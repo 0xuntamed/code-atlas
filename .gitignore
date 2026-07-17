@@ -1,0 +1,23 @@
+# Local configuration and data
+.env
+.env.*
+!.env.example
+.codeatlas-data/
+
+# Go
+codeatlas
+codeatlas.exe
+coverage.out
+
+# Frontend
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

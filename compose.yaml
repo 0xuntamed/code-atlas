@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: codeatlas
+      POSTGRES_USER: codeatlas
+      POSTGRES_PASSWORD: codeatlas
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - codeatlas_postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codeatlas -d codeatlas"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  codeatlas_postgres:
