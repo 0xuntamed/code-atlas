@@ -5,8 +5,8 @@
 .codeatlas-data/
 
 # Go
-codeatlas
-codeatlas.exe
+/codeatlas
+/codeatlas.exe
 coverage.out
 
 # Frontend
