@@ -37,3 +37,25 @@ func TestBuildGraphResolvesLocalCallsAndKeepsUnknowns(t *testing.T) {
 		t.Fatal("expected unknown call to remain explicit")
 	}
 }
+
+func TestBuildGraphMarksTestOnlyModules(t *testing.T) {
+	runID := "run"
+	projectID := "project"
+	files := []repository.DiscoveredFile{
+		{Record: model.FileRecord{ID: id.Stable(runID, "file", "src/main.ts"), ProjectID: projectID, RunID: runID, Path: "src/main.ts", Language: "typescript", Classification: "source"}},
+		{Record: model.FileRecord{ID: id.Stable(runID, "file", "tests/main.test.ts"), ProjectID: projectID, RunID: runID, Path: "tests/main.test.ts", Language: "typescript", Classification: "source", IsTest: true}},
+	}
+	graph := buildGraph(projectID, runID, files, nil)
+	modules := make(map[string]model.Entity)
+	for _, entity := range graph.Entities {
+		if entity.Kind == "module" {
+			modules[entity.QualifiedName] = entity
+		}
+	}
+	if modules["src"].IsTest {
+		t.Fatal("production module was marked as test-only")
+	}
+	if !modules["tests"].IsTest {
+		t.Fatal("test-only module was not marked as test")
+	}
+}

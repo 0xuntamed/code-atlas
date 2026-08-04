@@ -37,6 +37,7 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+entityColumns+`,
 			count(DISTINCT file_entity.id) AS file_count,
+			count(DISTINCT file_entity.id) FILTER (WHERE file_entity.is_test) AS test_file_count,
 			count(DISTINCT symbol.id) FILTER (
 				WHERE symbol.kind NOT IN ('module', 'file')
 			) AS symbol_count,
@@ -66,7 +67,7 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 	for rows.Next() {
 		var entity model.Entity
 		var metadata []byte
-		var fileCount, symbolCount, routeCount int
+		var fileCount, testFileCount, symbolCount, routeCount int
 		if err := rows.Scan(
 			&entity.ID,
 			&entity.ProjectID,
@@ -83,6 +84,7 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 			&entity.IsTest,
 			&metadata,
 			&fileCount,
+			&testFileCount,
 			&symbolCount,
 			&routeCount,
 		); err != nil {
@@ -93,9 +95,11 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 			entity.Metadata = make(map[string]any)
 		}
 		entity.Metadata["fileCount"] = fileCount
+		entity.Metadata["testFileCount"] = testFileCount
 		entity.Metadata["symbolCount"] = symbolCount
 		entity.Metadata["routeCount"] = routeCount
 		entity.Metadata["expandable"] = true
+		entity.IsTest = fileCount > 0 && testFileCount == fileCount
 		if len(nodes) < limit {
 			nodes = append(nodes, entity)
 		} else {

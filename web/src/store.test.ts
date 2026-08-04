@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useAtlasStore } from './store'
 
-describe('atlas view state', () => {
+describe('atlas workspace state', () => {
   beforeEach(() =>
-    useAtlasStore.setState({ projectId: '', selectedEntityId: '', graphView: 'architecture' }),
+    useAtlasStore.setState({
+      projectId: '',
+      selectedEntityId: '',
+      graphView: 'architecture',
+      showTests: false,
+      showReferences: false,
+    }),
   )
 
   it('resets graph context when switching projects', () => {
@@ -11,7 +17,6 @@ describe('atlas view state', () => {
     useAtlasStore.getState().selectEntity('entity-a')
     useAtlasStore.getState().setGraphView('impact')
     useAtlasStore.getState().setProject('project-b')
-
     expect(useAtlasStore.getState()).toMatchObject({
       projectId: 'project-b',
       selectedEntityId: '',
@@ -19,16 +24,14 @@ describe('atlas view state', () => {
     })
   })
 
-  it('clears the selected entity without changing the active graph mode', () => {
-    useAtlasStore.getState().setProject('project-a')
-    useAtlasStore.getState().selectEntity('entity-a')
-    useAtlasStore.getState().setGraphView('impact')
-    useAtlasStore.getState().resetSelection()
-
+  it('keeps explicit signal filters across graph modes', () => {
+    useAtlasStore.getState().toggleTests()
+    useAtlasStore.getState().toggleReferences()
+    useAtlasStore.getState().setGraphView('flow')
     expect(useAtlasStore.getState()).toMatchObject({
-      projectId: 'project-a',
-      selectedEntityId: '',
-      graphView: 'impact',
+      graphView: 'flow',
+      showTests: true,
+      showReferences: true,
     })
   })
 })

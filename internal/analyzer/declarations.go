@@ -19,6 +19,8 @@ func (b *graphBuilder) indexFiles() {
 }
 
 func (b *graphBuilder) addStructuralEntities() {
+	moduleHasFiles := make(map[string]bool)
+	moduleHasProductionFiles := make(map[string]bool)
 	for _, item := range b.discovered {
 		record := item.Record
 		if record.Classification != "source" {
@@ -26,6 +28,10 @@ func (b *graphBuilder) addStructuralEntities() {
 		}
 
 		moduleID := b.ensureModule(record.Path)
+		moduleHasFiles[moduleID] = true
+		if !record.IsTest {
+			moduleHasProductionFiles[moduleID] = true
+		}
 		fileEntity := b.newFileEntity(record)
 		b.fileEntityIDs[record.Path] = fileEntity.ID
 		b.graph.Entities = append(b.graph.Entities, fileEntity)
@@ -45,6 +51,13 @@ func (b *graphBuilder) addStructuralEntities() {
 				nil,
 			),
 		)
+	}
+
+	for index := range b.graph.Entities {
+		entity := &b.graph.Entities[index]
+		if entity.Kind == "module" && moduleHasFiles[entity.ID] && !moduleHasProductionFiles[entity.ID] {
+			entity.IsTest = true
+		}
 	}
 }
 
