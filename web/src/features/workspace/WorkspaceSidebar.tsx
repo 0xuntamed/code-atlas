@@ -1,78 +1,160 @@
-import type { GraphResponse, GraphView } from '../../types'
+import { Icon, type IconName } from '../../components/Icon'
+import type { FilteredGraph } from '../../lib/graph'
+import type { GraphView } from '../../types'
 import { SkippedFiles } from '../files/SkippedFiles'
 import { SymbolSearch } from '../search/SymbolSearch'
 
-const viewDescriptions: Record<GraphView, string> = {
-  architecture: 'Progressive repository structure',
-  flow: 'Downstream execution from a root',
-  impact: 'Upstream and downstream dependents',
+const viewContent: Record<GraphView, { icon: IconName; label: string; copy: string }> = {
+  architecture: { icon: 'architecture', label: 'Architecture', copy: 'Modules and symbols' },
+  flow: { icon: 'flow', label: 'Flow', copy: 'Downstream execution' },
+  impact: { icon: 'impact', label: 'Impact', copy: 'Change blast radius' },
 }
 
 export function WorkspaceSidebar({
   projectId,
   activeView,
-  graph,
+  filtered,
+  showTests,
+  showReferences,
   onSelect,
+  onToggleTests,
+  onToggleReferences,
   onViewChange,
 }: {
   projectId: string
   activeView: GraphView
-  graph?: GraphResponse
+  filtered: FilteredGraph
+  showTests: boolean
+  showReferences: boolean
   onSelect: (id: string) => void
+  onToggleTests: () => void
+  onToggleReferences: () => void
   onViewChange: (view: GraphView) => void
 }) {
   return (
-    <aside className="left-rail">
-      <SymbolSearch projectId={projectId} onSelect={onSelect} />
-      <GraphModeNavigation activeView={activeView} onChange={onViewChange} />
-      <GraphBudget graph={graph} view={activeView} />
-      <SkippedFiles projectId={projectId} />
+    <aside className="min-h-0 overflow-y-auto border-b border-border bg-canvas-raised/72 p-3 md:border-b-0 md:border-r md:p-4">
+      <SymbolSearch projectId={projectId} showTests={showTests} onSelect={onSelect} />
+
+      <section className="mt-4">
+        <span className="px-1 text-[9px] font-bold uppercase tracking-[0.18em] text-dim">
+          Graph mode
+        </span>
+        <nav aria-label="Graph modes" className="mt-2 grid grid-cols-3 gap-1.5 md:grid-cols-1">
+          {(Object.keys(viewContent) as GraphView[]).map((view) => {
+            const item = viewContent[view]
+            const active = activeView === view
+            return (
+              <button
+                aria-current={active ? 'page' : undefined}
+                className={`flex min-w-0 items-center gap-3 rounded-xl border px-2.5 py-2.5 text-left transition-colors md:px-3 ${active ? 'border-primary/30 bg-primary/8 text-foreground' : 'border-transparent text-muted hover:border-border hover:bg-surface hover:text-foreground'}`}
+                key={view}
+                onClick={() => onViewChange(view)}
+                type="button"
+              >
+                <span
+                  className={`grid size-8 shrink-0 place-items-center rounded-lg ${active ? 'bg-primary/12 text-primary' : 'bg-panel text-dim'}`}
+                >
+                  <Icon className="size-4" name={item.icon} />
+                </span>
+                <span className="hidden min-w-0 md:block">
+                  <strong className="block text-xs font-semibold">{item.label}</strong>
+                  <small className="mt-0.5 block truncate text-[9px] text-dim">{item.copy}</small>
+                </span>
+              </button>
+            )
+          })}
+        </nav>
+      </section>
+
+      <section className="mt-5 hidden md:block">
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-dim">
+            Signal filters
+          </span>
+          <Icon className="size-3.5 text-dim" name="filter" />
+        </div>
+        <div className="mt-2 space-y-1.5">
+          <FilterToggle
+            checked={showTests}
+            copy="Test files and symbols"
+            icon="test"
+            label="Include tests"
+            onChange={onToggleTests}
+          />
+          <FilterToggle
+            checked={showReferences}
+            copy="External and unresolved"
+            icon="external"
+            label="Reference noise"
+            onChange={onToggleReferences}
+          />
+        </div>
+      </section>
+
+      <section className="mt-5 hidden rounded-xl border border-border bg-panel p-3 md:block">
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] font-bold uppercase tracking-[0.16em] text-dim">
+            Focused view
+          </span>
+          <span className="size-1.5 rounded-full bg-primary" />
+        </div>
+        <strong className="mt-2 block font-mono text-sm font-semibold text-foreground">
+          {filtered.graph ? `${filtered.graph.nodes.length} nodes` : 'Loading'}
+        </strong>
+        <p className="mt-1 text-[10px] leading-4 text-muted">
+          {filtered.graph
+            ? `${filtered.graph.edges.length} visible relationships`
+            : 'Reading graph metadata'}
+        </p>
+        {filtered.hiddenTotal > 0 ? (
+          <p className="mt-2 border-t border-border pt-2 text-[9px] leading-4 text-dim">
+            {filtered.hiddenTotal} low-signal nodes hidden by default
+          </p>
+        ) : null}
+      </section>
+
+      <div className="mt-4 hidden border-t border-border pt-3 md:block">
+        <SkippedFiles projectId={projectId} />
+      </div>
     </aside>
   )
 }
 
-function GraphModeNavigation({
-  activeView,
+function FilterToggle({
+  checked,
+  label,
+  copy,
+  icon,
   onChange,
 }: {
-  activeView: GraphView
-  onChange: (view: GraphView) => void
+  checked: boolean
+  label: string
+  copy: string
+  icon: 'test' | 'external'
+  onChange: () => void
 }) {
-  const views: GraphView[] = ['architecture', 'flow', 'impact']
   return (
-    <nav className="mode-navigation" aria-label="Graph modes">
-      <span className="rail-label">Graph mode</span>
-      {views.map((view, index) => (
-        <button
-          className={view === activeView ? 'active' : ''}
-          key={view}
-          onClick={() => onChange(view)}
-        >
-          <span className="mode-index">0{index + 1}</span>
-          <span>
-            <strong>{view}</strong>
-            <small>{viewDescriptions[view]}</small>
-          </span>
-        </button>
-      ))}
-    </nav>
-  )
-}
-
-function GraphBudget({ graph, view }: { graph?: GraphResponse; view: GraphView }) {
-  const message = graph?.truncated
-    ? `View capped at ${graph.limit} nodes. Drill into a narrower scope.`
-    : graph
-      ? `${graph.nodes.length} nodes · ${graph.edges.length} relationships`
-      : view === 'architecture'
-        ? 'Loading the module overview.'
-        : 'Select a symbol to establish a root.'
-
-  return (
-    <section className="graph-budget">
-      <span>Render budget</span>
-      <strong>{message}</strong>
-      <p>Only visible cards mount in the graph canvas.</p>
-    </section>
+    <button
+      aria-checked={checked}
+      className="flex w-full items-center gap-3 rounded-xl border border-transparent px-2 py-2 text-left hover:border-border hover:bg-surface"
+      onClick={onChange}
+      role="switch"
+      type="button"
+    >
+      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-panel text-dim">
+        <Icon className="size-3.5" name={icon} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <strong className="block text-[11px] font-semibold text-foreground">{label}</strong>
+        <small className="block text-[9px] text-dim">{copy}</small>
+      </span>
+      <span
+        className={`relative h-5 w-9 rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-surface'}`}
+      >
+        <i
+          className={`absolute top-1/2 size-3.5 -translate-y-1/2 rounded-full bg-foreground shadow transition-transform ${checked ? 'translate-x-[18px]' : 'translate-x-[3px]'}`}
+        />
+      </span>
+    </button>
   )
 }

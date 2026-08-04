@@ -1,6 +1,6 @@
 # CodeAtlas
 
-CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, Go, and Python repositories. It maps symbols, imports, calls, web routes, execution flow, and upstream/downstream impact without storing source code in PostgreSQL.
+CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, Go, and Python repositories. It maps symbols, imports, calls, web routes, execution flow, and upstream/downstream impact without storing source code in PostgreSQL. The Go server ships the production React interface as embedded static assets, so no separate frontend server is required in production.
 
 ## Privacy boundary
 
@@ -14,7 +14,7 @@ CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, G
 ## Requirements
 
 - Go 1.26+
-- Node.js 22+ and npm
+- Node.js 22.12+ (or 20.19+) and npm
 - Docker with Compose
 - Git
 - A C toolchain for production Tree-sitter builds. When CGO is unavailable, CodeAtlas compiles a conservative structural parser fallback so local development remains functional.
@@ -36,7 +36,18 @@ The header keeps repository lifecycle actions available after onboarding: add an
 
 The bundled PostgreSQL container is exposed on loopback port `5433` to avoid colliding with a conventional host PostgreSQL installation on `5432`.
 
-During frontend development, run `npm run dev` in `web`; Vite proxies `/api` to the Go server. Register a folder from the terminal with:
+During frontend development, keep the Go server running and start Vite in a second terminal. Vite defaults to `127.0.0.1:5173` and proxies `/api` to the Go server:
+
+```powershell
+# Terminal 1
+go run ./cmd/codeatlas serve
+
+# Terminal 2
+cd web
+npm run dev
+```
+
+Register a folder from the terminal with:
 
 ```powershell
 go run ./cmd/codeatlas add C:\absolute\path\to\repo
@@ -44,11 +55,24 @@ go run ./cmd/codeatlas add C:\absolute\path\to\repo
 
 Configuration:
 
-| Variable | Default |
-| --- | --- |
+| Variable                 | Default                                                                   |
+| ------------------------ | ------------------------------------------------------------------------- |
 | `CODEATLAS_DATABASE_URL` | `postgres://codeatlas:codeatlas@127.0.0.1:5433/codeatlas?sslmode=disable` |
-| `CODEATLAS_LISTEN_ADDR` | `127.0.0.1:7331` |
-| `CODEATLAS_DATA_DIR` | OS user cache directory under `CodeAtlas` |
+| `CODEATLAS_LISTEN_ADDR`  | `127.0.0.1:7331`                                                          |
+| `CODEATLAS_DATA_DIR`     | OS user cache directory under `CodeAtlas`                                 |
+
+## Frontend architecture
+
+The frontend is a React 19 and TypeScript application built with Vite 7 and Tailwind CSS v4 through the official Vite integration.
+
+- `web/src/styles/app.css` defines the CSS-first semantic token contract, component radii, graph colors, animations, and reduced-motion behavior.
+- Reusable buttons, dialogs, icons, and brand elements live in `web/src/components` and consume static Tailwind variant maps.
+- TanStack Query owns API requests, cancellation, polling, retries, and cache invalidation. Offline and mutation failures remain visible instead of falling through to empty states.
+- Zustand stores only cross-workspace interaction state such as the selected project, graph mode, selected entity, and explicit signal filters.
+- React Flow renders the bounded graph, while ELK layout runs outside the main thread in a worker and falls back to a deterministic grid if layout exceeds its time budget.
+- Monaco and its local language support are lazy-loaded only when verified source evidence is requested.
+
+`npm run build` writes the production frontend directly to `internal/webui/dist`. That directory is embedded by `internal/webui/webui.go`; rebuild it before compiling or distributing the Go executable after frontend changes.
 
 ## Analysis model
 
@@ -60,7 +84,9 @@ Supported route detectors:
 - `net/http` and Gin for Go
 - FastAPI and Flask for Python
 
-The skipped-file view explains every visited exclusion. Entire ignored directories are recorded once and pruned without enumerating their descendants. Tests remain included because they are useful impact dependents.
+The skipped-file view explains every visited exclusion. Entire ignored directories are recorded once and pruned without enumerating their descendants. Unsupported files, generated output, dependencies, binaries, ignored paths, and privacy exclusions remain inventory metadata and never become graph nodes.
+
+Tests are still analyzed because they are useful impact dependents, but test files, test symbols, and test-only modules are hidden from the canvas by default. They can be enabled with the **Include tests** filter.
 
 ## Graph experience and render budgets
 
@@ -71,7 +97,9 @@ The architecture explorer uses progressive disclosure instead of flattening ever
 3. Opening a file loads only its declarations and direct dependencies.
 4. Flow and impact views start from a selected symbol and request at most 120 nodes by default.
 
-React Flow mounts only visible cards, dense views suppress persistent edge labels and animation, and ELK layout runs in a worker with a bounded fallback layout. The skipped-file list also has a fixed DOM budget. Monaco and the four supported syntax tokenizers are bundled locally and lazy-loaded only when source evidence is opened.
+The default canvas keeps only supported architectural entities and hides external or unresolved symbols behind the **Reference noise** filter. Edges are retained only when both endpoints remain visible, preventing hidden or unimportant records from leaving orphaned relationships.
+
+React Flow mounts only visible cards, dense views suppress persistent edge labels and animation, and ELK layout runs in a worker with a bounded fallback layout. Graph layout identity includes edge topology so same-size graph updates cannot reuse stale positions. The skipped-file list uses `content-visibility` and a bounded API result. Monaco and the four supported syntax tokenizers are bundled locally and lazy-loaded only when source evidence is opened.
 
 ## Code layout
 
@@ -80,8 +108,11 @@ React Flow mounts only visible cards, dense views suppress persistent edge label
 - `internal/parser`: Tree-sitter adapters plus a no-CGO development fallback.
 - `internal/repository`: safe Git acquisition, discovery, hashing, and ignore rules.
 - `internal/store`: PostgreSQL migrations, durable jobs, atomic promotion, search, and graph traversal.
+- `internal/webui`: generated frontend assets and the `go:embed` HTTP handler.
+- `web/src/components`: accessible UI primitives and the in-repository SVG icon system.
 - `web/src/features`: project, analysis, graph, search, file inventory, source, and workspace UI boundaries.
-- `web/src/styles`: formatted design-system, shell, feature, graph, inspector, and responsive styles.
+- `web/src/lib`: graph filtering, graph-layout identity, and shared utilities.
+- `web/src/styles/app.css`: Tailwind v4 theme tokens, base styles, custom utilities, and React Flow integration styles.
 
 ## API
 
@@ -95,6 +126,7 @@ go vet ./cmd/... ./internal/...
 cd web
 npm run check
 npm run build
+npm audit
 ```
 
-`npm run check` runs strict TypeScript, ESLint with React Hooks rules, Vitest, and Prettier verification. The repository includes parser fixtures for all supported languages, privacy/ignore tests, API security and source-window tests, graph resolution tests, and a cross-platform CGO CI build that exercises the official Tree-sitter grammars.
+`npm run check` runs strict TypeScript, ESLint with React Hooks rules, Vitest, and Prettier verification. Frontend tests cover workspace-state resets, explicit filter persistence, low-signal graph filtering, test-only modules, edge cleanup, and topology-sensitive layout keys. The Go suite includes parser fixtures for all supported languages, privacy/ignore tests, API security and source-window tests, graph resolution tests, test-only module classification, and a cross-platform CGO CI build that exercises the official Tree-sitter grammars.

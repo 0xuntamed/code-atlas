@@ -17,10 +17,15 @@ export class APIError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api/v1${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    signal,
+    headers: {
+      Accept: 'application/json',
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...init?.headers,
+    },
   })
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as {
@@ -37,40 +42,68 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  projects: () => request<{ projects: Project[] }>('/projects'),
-  project: (projectId: string) => request<Project>(`/projects/${projectId}`),
+  projects: (signal?: AbortSignal) =>
+    request<{ projects: Project[] }>('/projects', undefined, signal),
+  project: (projectId: string, signal?: AbortSignal) =>
+    request<Project>(`/projects/${encodeURIComponent(projectId)}`, undefined, signal),
   createProject: (source: { type: SourceType; path?: string; url?: string; ref?: string }) =>
     request<{ projectId: string; analysisRunId: string; status: string }>('/projects', {
       method: 'POST',
       body: JSON.stringify({ source }),
     }),
   deleteProject: (projectId: string) =>
-    request<void>(`/projects/${projectId}`, { method: 'DELETE' }),
+    request<void>(`/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }),
   shutdown: () =>
     request<{ status: string }>('/system/shutdown', {
       method: 'POST',
       headers: { 'X-CodeAtlas-Intent': 'shutdown' },
     }),
   analyze: (projectId: string) =>
-    request<{ analysisRunId: string }>(`/projects/${projectId}/analyses`, { method: 'POST' }),
-  architecture: (projectId: string, scopeId = '') => {
+    request<{ analysisRunId: string }>(`/projects/${encodeURIComponent(projectId)}/analyses`, {
+      method: 'POST',
+    }),
+  architecture: (projectId: string, scopeId = '', signal?: AbortSignal) => {
     const scope = scopeId ? `&scope=${encodeURIComponent(scopeId)}` : ''
-    return request<GraphResponse>(`/projects/${projectId}/graph/architecture?limit=80${scope}`)
+    return request<GraphResponse>(
+      `/projects/${encodeURIComponent(projectId)}/graph/architecture?limit=80${scope}`,
+      undefined,
+      signal,
+    )
   },
-  flow: (projectId: string, entityId: string) =>
-    request<GraphResponse>(`/projects/${projectId}/flow/${entityId}?depth=6&limit=120`),
-  impact: (projectId: string, entityId: string) =>
+  flow: (projectId: string, entityId: string, signal?: AbortSignal) =>
     request<GraphResponse>(
-      `/projects/${projectId}/impact/${entityId}?direction=both&depth=4&limit=120`,
+      `/projects/${encodeURIComponent(projectId)}/flow/${encodeURIComponent(entityId)}?depth=6&limit=120`,
+      undefined,
+      signal,
     ),
-  search: (projectId: string, query: string) =>
-    request<{ entities: Entity[] }>(`/projects/${projectId}/search?q=${encodeURIComponent(query)}`),
-  files: (projectId: string, classification = '', limit = 200) =>
+  impact: (projectId: string, entityId: string, signal?: AbortSignal) =>
+    request<GraphResponse>(
+      `/projects/${encodeURIComponent(projectId)}/impact/${encodeURIComponent(entityId)}?direction=both&depth=4&limit=120`,
+      undefined,
+      signal,
+    ),
+  search: (projectId: string, query: string, signal?: AbortSignal) =>
+    request<{ entities: Entity[] }>(
+      `/projects/${encodeURIComponent(projectId)}/search?q=${encodeURIComponent(query)}`,
+      undefined,
+      signal,
+    ),
+  files: (projectId: string, classification = '', limit = 200, signal?: AbortSignal) =>
     request<{ files: FileRecord[] }>(
-      `/projects/${projectId}/files?classification=${encodeURIComponent(classification)}&limit=${limit}`,
+      `/projects/${encodeURIComponent(projectId)}/files?classification=${encodeURIComponent(classification)}&limit=${limit}`,
+      undefined,
+      signal,
     ),
-  entity: (projectId: string, entityId: string) =>
-    request<Entity>(`/projects/${projectId}/entities/${entityId}`),
-  source: (projectId: string, entityId: string) =>
-    request<SourceEvidence>(`/projects/${projectId}/entities/${entityId}/source`),
+  entity: (projectId: string, entityId: string, signal?: AbortSignal) =>
+    request<Entity>(
+      `/projects/${encodeURIComponent(projectId)}/entities/${encodeURIComponent(entityId)}`,
+      undefined,
+      signal,
+    ),
+  source: (projectId: string, entityId: string, signal?: AbortSignal) =>
+    request<SourceEvidence>(
+      `/projects/${encodeURIComponent(projectId)}/entities/${encodeURIComponent(entityId)}/source`,
+      undefined,
+      signal,
+    ),
 }

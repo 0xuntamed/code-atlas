@@ -6,9 +6,7 @@ import 'monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution'
 import 'monaco-editor/esm/vs/basic-languages/python/python.contribution'
 import 'monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution'
 
-self.MonacoEnvironment = {
-  getWorker: () => new EditorWorker(),
-}
+self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
 loader.config({ monaco })
 
 export default function LocalSourceEditor({
@@ -22,16 +20,23 @@ export default function LocalSourceEditor({
     <Editor
       height="100%"
       language={language}
-      loading={<div className="source-loading">Loading local source…</div>}
+      loading={
+        <div className="grid h-full place-items-center text-xs text-muted">Loading editor…</div>
+      }
       options={{
+        automaticLayout: true,
         readOnly: true,
         minimap: { enabled: false },
         fontSize: 12,
+        fontFamily: "'SFMono-Regular', Consolas, 'Liberation Mono', monospace",
         lineNumbersMinChars: 3,
         scrollBeyondLastLine: false,
         wordWrap: 'off',
         renderLineHighlight: 'line',
-        padding: { top: 12 },
+        padding: { top: 12, bottom: 12 },
+        overviewRulerBorder: false,
+        overviewRulerLanes: 0,
+        folding: false,
       }}
       theme="vs-dark"
       value={value}

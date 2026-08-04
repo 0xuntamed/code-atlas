@@ -1,4 +1,6 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
+import { Button } from '../../components/Button'
+import { Icon } from '../../components/Icon'
 import type { SourceType } from '../../types'
 
 export interface ProjectInput {
@@ -11,24 +13,22 @@ export interface ProjectInput {
 export function ProjectForm({
   busy,
   error,
-  compact = false,
   onSubmit,
 }: {
   busy: boolean
   error?: string
-  compact?: boolean
   onSubmit: (source: ProjectInput) => void
 }) {
   const [type, setType] = useState<SourceType>('local')
   const [value, setValue] = useState('')
   const [gitRef, setGitRef] = useState('')
+  const valueId = useId()
+  const refId = useId()
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const trimmedValue = value.trim()
-    if (!trimmedValue) {
-      return
-    }
+    if (!trimmedValue) return
     onSubmit(
       type === 'local'
         ? { type, path: trimmedValue }
@@ -37,30 +37,33 @@ export function ProjectForm({
   }
 
   return (
-    <form className={`project-form ${compact ? 'compact' : ''}`} onSubmit={submit}>
-      <div className="source-toggle" aria-label="Repository source">
-        <button
-          aria-pressed={type === 'local'}
-          className={type === 'local' ? 'active' : ''}
+    <form className="p-5 sm:p-6" onSubmit={submit}>
+      <div
+        aria-label="Repository source"
+        className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-canvas-raised p-1"
+      >
+        <SourceOption
+          active={type === 'local'}
+          icon="folder"
+          label="Local folder"
           onClick={() => setType('local')}
-          type="button"
-        >
-          Local folder
-        </button>
-        <button
-          aria-pressed={type === 'git'}
-          className={type === 'git' ? 'active' : ''}
+        />
+        <SourceOption
+          active={type === 'git'}
+          icon="repository"
+          label="Git repository"
           onClick={() => setType('git')}
-          type="button"
-        >
-          Git repository
-        </button>
+        />
       </div>
 
-      <label>
-        <span>{type === 'local' ? 'Absolute repository path' : 'HTTPS or SSH Git URL'}</span>
+      <label className="mt-5 block" htmlFor={valueId}>
+        <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+          {type === 'local' ? 'Absolute repository path' : 'HTTPS or SSH Git URL'}
+        </span>
         <input
           autoFocus
+          className="h-11 w-full rounded-control border border-border-strong bg-canvas-raised px-3.5 font-mono text-sm text-foreground placeholder:text-dim focus:border-primary/60 focus:outline-none focus:ring-2 focus:ring-primary/15"
+          id={valueId}
           onChange={(event) => setValue(event.target.value)}
           placeholder={
             type === 'local' ? 'C:\\work\\payments-api' : 'https://github.com/acme/payments-api.git'
@@ -70,30 +73,60 @@ export function ProjectForm({
         />
       </label>
 
-      {type === 'git' && (
-        <label>
-          <span>
-            Branch or tag <small>optional</small>
+      {type === 'git' ? (
+        <label className="mt-4 block" htmlFor={refId}>
+          <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+            Branch or tag <small className="normal-case tracking-normal text-dim">optional</small>
           </span>
           <input
+            className="h-11 w-full rounded-control border border-border-strong bg-canvas-raised px-3.5 font-mono text-sm text-foreground placeholder:text-dim focus:border-primary/60 focus:outline-none focus:ring-2 focus:ring-primary/15"
+            id={refId}
             onChange={(event) => setGitRef(event.target.value)}
             placeholder="main"
             spellCheck={false}
             value={gitRef}
           />
         </label>
-      )}
+      ) : null}
 
-      {error && <div className="inline-error">{error}</div>}
+      {error ? (
+        <div
+          className="mt-4 flex items-start gap-2 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2.5 text-sm text-red-200"
+          role="alert"
+        >
+          <Icon className="mt-0.5 size-4 shrink-0" name="alert" />
+          {error}
+        </div>
+      ) : null}
 
-      <button
-        className="button primary submit-project"
-        disabled={!value.trim() || busy}
-        type="submit"
-      >
+      <Button className="mt-5 w-full" disabled={!value.trim() || busy} size="lg" type="submit">
         {busy ? 'Registering repository…' : 'Build local atlas'}
-        <span aria-hidden="true">→</span>
-      </button>
+        <Icon className="size-4" name="arrow-right" />
+      </Button>
     </form>
+  )
+}
+
+function SourceOption({
+  active,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean
+  icon: 'folder' | 'repository'
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      aria-pressed={active}
+      className={`flex h-10 items-center justify-center gap-2 rounded-lg text-sm font-semibold transition-colors ${active ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-foreground'}`}
+      onClick={onClick}
+      type="button"
+    >
+      <Icon className="size-4" name={icon} />
+      {label}
+    </button>
   )
 }

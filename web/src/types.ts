@@ -11,6 +11,9 @@ export interface AnalysisRun {
   total: number
   message?: string
   errorMessage?: string
+  startedAt?: string
+  completedAt?: string
+  createdAt?: string
 }
 
 export interface Project {
@@ -24,6 +27,8 @@ export interface Project {
   status: ProjectStatus
   activeRunId?: string
   latestRun?: AnalysisRun
+  createdAt?: string
+  updatedAt?: string
 }
 
 export interface SourceRange {
@@ -95,4 +100,9 @@ export interface SourceEvidence {
   startLine: number
   endLine: number
   code: string
+}
+
+export interface GraphFilters {
+  showTests: boolean
+  showReferences: boolean
 }

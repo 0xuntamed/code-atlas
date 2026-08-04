@@ -1,50 +1,94 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api'
-
-const visibleFileLimit = 100
+import { Button } from '../../components/Button'
+import { Dialog } from '../../components/Dialog'
+import { Icon } from '../../components/Icon'
 
 export function SkippedFiles({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false)
   const query = useQuery({
     queryKey: ['files', projectId, 'skipped'],
-    queryFn: () => api.files(projectId, 'skipped', 200),
+    queryFn: ({ signal }) => api.files(projectId, 'skipped', 500, signal),
     enabled: open,
   })
   const files = query.data?.files ?? []
-  const visibleFiles = files.slice(0, visibleFileLimit)
 
   return (
-    <section className={`skipped-files ${open ? 'is-open' : ''}`}>
-      <button className="skipped-trigger" onClick={() => setOpen((current) => !current)}>
-        <span>
-          <strong>Skipped inventory</strong>
-          <small>Privacy and noise exclusions</small>
+    <>
+      <Button
+        className="w-full justify-between"
+        intent="ghost"
+        onClick={() => setOpen(true)}
+        size="sm"
+      >
+        <span className="inline-flex items-center gap-2">
+          <Icon className="size-3.5" name="shield" />
+          Skipped inventory
         </span>
-        <b aria-hidden="true">{open ? '−' : '+'}</b>
-      </button>
+        <Icon className="size-3.5" name="chevron-right" />
+      </Button>
 
-      {open && (
-        <div className="skipped-content">
-          {query.isLoading && <p>Loading metadata…</p>}
-          {visibleFiles.map((file) => (
-            <div className="skipped-row" key={file.id}>
-              <span>{file.isDirectory ? 'DIR' : 'FILE'}</span>
-              <div>
-                <strong>{file.path}</strong>
-                <small>{file.ignoreReason}</small>
-              </div>
-            </div>
-          ))}
-          {files.length > visibleFileLimit && (
-            <p className="bounded-list-note">
-              Showing the first {visibleFileLimit} records. Use the API to inspect the full
-              inventory.
-            </p>
-          )}
-          {!query.isLoading && files.length === 0 && <p>No skipped files were recorded.</p>}
+      <Dialog
+        description="Privacy exclusions, generated output, dependencies, binaries, and unsupported files stay outside the graph."
+        onClose={() => setOpen(false)}
+        open={open}
+        size="lg"
+        title="Skipped file inventory"
+      >
+        <div className="border-b border-border bg-canvas-raised/45 px-5 py-3 text-xs text-muted sm:px-6">
+          {query.isLoading
+            ? 'Loading local metadata…'
+            : query.isError
+              ? 'Inventory unavailable'
+              : `${files.length} bounded inventory records`}
         </div>
-      )}
-    </section>
+        <div className="max-h-[62dvh] overflow-y-auto p-3 sm:p-4">
+          {query.isError ? (
+            <div
+              className="m-2 rounded-xl border border-danger/30 bg-danger/10 p-5 text-center"
+              role="alert"
+            >
+              <p className="text-sm text-danger-foreground">
+                The local API could not load the skipped inventory.
+              </p>
+              <Button
+                className="mt-4"
+                intent="outline"
+                onClick={() => void query.refetch()}
+                size="sm"
+              >
+                <Icon className="size-3.5" name="refresh" />
+                Try again
+              </Button>
+            </div>
+          ) : null}
+          {files.map((file) => (
+            <article
+              className="content-auto flex items-start gap-3 rounded-lg px-3 py-3 hover:bg-surface/65"
+              key={file.id}
+            >
+              <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-canvas-raised text-dim">
+                <Icon className="size-3.5" name={file.isDirectory ? 'folder' : 'file'} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <strong className="block break-all font-mono text-[11px] font-medium text-foreground">
+                  {file.path}
+                </strong>
+                <small className="mt-1 block text-[10px] leading-4 text-muted">
+                  {file.ignoreReason || 'Not part of the source graph'}
+                </small>
+              </div>
+              <span className="rounded border border-border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-dim">
+                {file.isDirectory ? 'dir' : 'file'}
+              </span>
+            </article>
+          ))}
+          {!query.isLoading && !query.isError && files.length === 0 ? (
+            <p className="py-12 text-center text-sm text-muted">No skipped files were recorded.</p>
+          ) : null}
+        </div>
+      </Dialog>
+    </>
   )
 }

@@ -7,11 +7,9 @@ export function useAnalysisEvents(project: Project): AnalysisRun | undefined {
   const [liveRun, setLiveRun] = useState<AnalysisRun>()
 
   useEffect(() => {
-    if (project.status === 'ready' || project.latestRun?.status === 'failed') {
-      return
-    }
+    if (project.status === 'ready' || project.latestRun?.status === 'failed') return
 
-    const events = new EventSource(`/api/v1/projects/${project.id}/events`)
+    const events = new EventSource(`/api/v1/projects/${encodeURIComponent(project.id)}/events`)
     const handleProgress = (event: Event) => {
       const nextRun = JSON.parse((event as MessageEvent).data) as AnalysisRun
       setLiveRun(nextRun)
