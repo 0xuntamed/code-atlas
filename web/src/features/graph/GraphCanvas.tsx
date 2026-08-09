@@ -1,11 +1,13 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
-import { Background, Controls, MarkerType, MiniMap, ReactFlow, type Edge } from '@xyflow/react'
+import { Background, Controls, MarkerType, MiniMap, Position, ReactFlow } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { graphLayoutKey } from '../../lib/graph'
 import type { GraphResponse, GraphView } from '../../types'
 import { AtlasNode, type AtlasFlowNode } from './AtlasNode'
+import { RelationshipEdge, type RelationshipFlowEdge } from './RelationshipEdge'
 
 const nodeTypes = { atlas: AtlasNode }
+const edgeTypes = { relationship: RelationshipEdge }
 
 export function GraphCanvas({
   graph,
@@ -72,19 +74,20 @@ export function GraphCanvas({
 
   const compact = (deferredGraph?.nodes.length ?? 0) > 60
   const showEdgeLabels = (deferredGraph?.nodes.length ?? 0) <= 30
+  const direction = mode === 'architecture' ? 'horizontal' : 'vertical'
 
   const nodes = useMemo<AtlasFlowNode[]>(() => {
     if (!deferredGraph || !positions) return []
     return deferredGraph.nodes.map((entity) => ({
       id: entity.id,
       type: 'atlas',
-      data: { entity, compact },
+      data: { entity, compact, direction },
       position: positions[entity.id] ?? { x: 0, y: 0 },
       selected: entity.id === selectedEntityId,
     }))
-  }, [compact, deferredGraph, positions, selectedEntityId])
+  }, [compact, deferredGraph, direction, positions, selectedEntityId])
 
-  const edges = useMemo<Edge[]>(() => {
+  const edges = useMemo<RelationshipFlowEdge[]>(() => {
     if (!deferredGraph) return []
     return deferredGraph.edges.map((relationship) => {
       const aggregateCount = relationship.metadata?.relationshipCount
@@ -92,11 +95,16 @@ export function GraphCanvas({
       const resolved = relationship.resolution === 'resolved'
       return {
         id: relationship.id,
+        type: 'relationship',
         source: relationship.source,
         target: relationship.target,
-        label: showEdgeLabels
-          ? `${relationship.kind.replaceAll('_', ' ')}${count > 1 ? ` ×${count}` : ''}`
-          : undefined,
+        sourcePosition: direction === 'vertical' ? Position.Bottom : Position.Right,
+        targetPosition: direction === 'vertical' ? Position.Top : Position.Left,
+        data: {
+          label: showEdgeLabels
+            ? `${relationship.kind.replaceAll('_', ' ')}${count > 1 ? ` x${count}` : ''}`
+            : undefined,
+        },
         animated: mode === 'flow' && resolved && deferredGraph.nodes.length < 45,
         markerEnd: {
           type: MarkerType.ArrowClosed,
@@ -107,18 +115,18 @@ export function GraphCanvas({
           strokeWidth: resolved ? 1.4 : 1,
           strokeDasharray: resolved ? undefined : '6 5',
         },
-        labelStyle: { fill: 'var(--ui-graph-label)', fontSize: 9, fontWeight: 600 },
       }
     })
-  }, [deferredGraph, mode, showEdgeLabels])
+  }, [deferredGraph, direction, mode, showEdgeLabels])
 
-  if (!graph) return <GraphLoading label="Loading derived metadata…" />
+  if (!graph) return <GraphLoading label="Loading derived metadata..." />
   if (!graph.nodes.length) return <GraphEmpty hiddenCount={hiddenCount} />
-  if (!positions) return <GraphLoading label="Arranging focused nodes…" />
+  if (!positions) return <GraphLoading label="Arranging focused nodes..." />
 
   return (
     <ReactFlow
       aria-label={`${mode} graph`}
+      edgeTypes={edgeTypes}
       edges={edges}
       elementsSelectable
       fitView

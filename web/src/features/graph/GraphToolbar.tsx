@@ -45,6 +45,12 @@ export function GraphToolbar({
               ))
             : null}
         </nav>
+        {view !== 'architecture' ? (
+          <span className="mt-1.5 inline-flex items-center gap-1 text-[9px] font-medium text-dim">
+            <Icon className="size-3 text-primary" name="arrow-right" />
+            Relationships flow top to bottom
+          </span>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 items-center gap-3 text-right">

@@ -19,6 +19,25 @@ export function RootRequired({ view }: { view: GraphView }) {
   )
 }
 
+export function TraceNeedsSymbol({ view }: { view: GraphView }) {
+  return (
+    <div className="grid h-full place-items-center px-6 text-center">
+      <div className="max-w-sm">
+        <span className="mx-auto grid size-14 place-items-center rounded-2xl border border-primary/20 bg-primary/5 text-primary">
+          <Icon className="size-5" name={view === 'flow' ? 'flow' : 'impact'} />
+        </span>
+        <h3 className="mt-5 text-sm font-semibold text-foreground">
+          {view === 'flow' ? 'Flow' : 'Impact'} starts from a symbol
+        </h3>
+        <p className="mt-2 text-xs leading-5 text-muted">
+          Modules and files hold no execution edges. Open one, then select a function, method, or
+          route to {view === 'flow' ? 'trace its downstream calls' : 'measure its change radius'}.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 export function GraphError() {
   return (
     <div className="grid h-full place-items-center px-6 text-center">

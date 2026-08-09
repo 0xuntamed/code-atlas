@@ -4,35 +4,42 @@ import { Icon, type IconName } from '../../components/Icon'
 import { entityKindLabel } from '../../lib/graph'
 import type { Entity } from '../../types'
 
-export type AtlasFlowNode = Node<{ entity: Entity; compact: boolean }, 'atlas'>
+export type AtlasFlowNode = Node<
+  { entity: Entity; compact: boolean; direction: 'horizontal' | 'vertical' },
+  'atlas'
+>
 
+// Cards render on an opaque base so relationship edges pass behind them instead
+// of bleeding through a translucent fill. Tone controls border + accent color only.
 const toneClasses: Record<string, string> = {
-  route: 'border-amber-400/30 bg-amber-400/[0.07] text-amber-200',
-  function: 'border-sky-400/25 bg-sky-400/[0.06] text-sky-200',
-  method: 'border-sky-400/25 bg-sky-400/[0.06] text-sky-200',
-  class: 'border-violet-400/25 bg-violet-400/[0.06] text-violet-200',
-  struct: 'border-violet-400/25 bg-violet-400/[0.06] text-violet-200',
-  interface: 'border-violet-400/25 bg-violet-400/[0.06] text-violet-200',
-  module: 'border-primary/30 bg-primary/[0.07] text-primary',
-  package: 'border-primary/30 bg-primary/[0.07] text-primary',
-  file: 'border-border-strong bg-panel-raised text-muted',
-  external_symbol: 'border-rose-400/20 bg-rose-400/[0.05] text-rose-200',
-  unresolved_symbol: 'border-border bg-canvas-raised text-dim',
+  route: 'border-amber-400/45 text-amber-300',
+  function: 'border-sky-400/40 text-sky-300',
+  method: 'border-sky-400/40 text-sky-300',
+  class: 'border-violet-400/40 text-violet-300',
+  struct: 'border-violet-400/40 text-violet-300',
+  interface: 'border-violet-400/40 text-violet-300',
+  module: 'border-primary/45 text-primary',
+  package: 'border-primary/45 text-primary',
+  file: 'border-border-strong text-muted',
+  external_symbol: 'border-rose-400/35 text-rose-300',
+  unresolved_symbol: 'border-border-strong text-dim',
 }
 
 export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<AtlasFlowNode>) {
-  const { entity, compact } = data
+  const { entity, compact, direction } = data
   const expandable = entity.kind === 'module' || entity.kind === 'file'
   const stats = moduleStats(entity)
   const icon = iconForKind(entity.kind)
+  const targetPosition = direction === 'vertical' ? Position.Top : Position.Left
+  const sourcePosition = direction === 'vertical' ? Position.Bottom : Position.Right
 
   return (
     <article
-      className={`group relative w-[214px] rounded-card border px-3.5 py-3 shadow-[0_12px_35px_oklch(0.03_0.01_244/0.28)] transition-[border-color,box-shadow,opacity,transform] ${toneClasses[entity.kind] ?? toneClasses.file} ${selected ? 'border-primary ring-2 ring-primary/20 shadow-[0_18px_45px_oklch(0.03_0.01_244/0.55)]' : ''} ${entity.distance && entity.distance > 3 ? 'opacity-70' : ''} ${compact ? 'py-2.5' : ''}`}
+      className={`group relative w-[214px] rounded-card border bg-panel-raised px-3.5 py-3 shadow-[0_10px_30px_oklch(0.03_0.01_244/0.45)] transition-[border-color,box-shadow,opacity,transform] ${toneClasses[entity.kind] ?? toneClasses.file} ${selected ? '!border-primary ring-2 ring-primary/30 shadow-[0_18px_45px_oklch(0.03_0.01_244/0.6)]' : ''} ${entity.distance && entity.distance > 3 ? 'opacity-75' : ''} ${compact ? 'py-2.5' : ''}`}
     >
       <Handle
-        className="!size-2.5 !border-2 !border-canvas !bg-border-strong"
-        position={Position.Left}
+        className="!size-2.5 !border-2 !border-canvas !bg-panel-raised transition-colors group-hover:!bg-primary"
+        position={targetPosition}
         type="target"
       />
       <div className="flex items-center gap-2">
@@ -70,8 +77,8 @@ export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<A
         </div>
       ) : null}
       <Handle
-        className="!size-2.5 !border-2 !border-canvas !bg-border-strong"
-        position={Position.Right}
+        className="!size-2.5 !border-2 !border-canvas !bg-panel-raised transition-colors group-hover:!bg-primary"
+        position={sourcePosition}
         type="source"
       />
     </article>

@@ -7,7 +7,7 @@ import type { ArchitectureCrumb, Entity, GraphResponse, GraphView, Project } fro
 import { AnalysisFailure, AnalysisProgress } from '../analysis/AnalysisProgress'
 import { useAnalysisEvents } from '../analysis/useAnalysisEvents'
 import { GraphCanvas } from '../graph/GraphCanvas'
-import { GraphError, RootRequired } from '../graph/GraphStates'
+import { GraphError, RootRequired, TraceNeedsSymbol } from '../graph/GraphStates'
 import { GraphToolbar } from '../graph/GraphToolbar'
 import { EntityInspector } from '../source/EntityInspector'
 import { WorkspaceSidebar } from './WorkspaceSidebar'
@@ -62,10 +62,23 @@ function ReadyWorkspace({ project }: { project: Project }) {
   })
   const selectedEntity = entityInGraph ?? selectedQuery.data
 
+  // Flow and impact traversals exist to surface what a symbol reaches, including
+  // external and unresolved calls. Hiding reference nodes there empties the view,
+  // so those modes always keep them regardless of the architecture-only filter.
+  const traceView = graphView !== 'architecture'
   const filtered = useMemo(
-    () => filterGraph(graphQuery.data, { showTests, showReferences }, selectedEntityId),
-    [graphQuery.data, selectedEntityId, showReferences, showTests],
+    () =>
+      filterGraph(
+        graphQuery.data,
+        { showTests, showReferences: showReferences || traceView },
+        selectedEntityId,
+      ),
+    [graphQuery.data, selectedEntityId, showReferences, showTests, traceView],
   )
+
+  // Flow/impact start from a function, method, or route — never a module or file.
+  const traceRootIsContainer =
+    traceView && (selectedEntity?.kind === 'module' || selectedEntity?.kind === 'file')
 
   const explore = (entity: Entity) => {
     if (entity.kind !== 'module' && entity.kind !== 'file') return
@@ -118,6 +131,8 @@ function ReadyWorkspace({ project }: { project: Project }) {
         <section className="relative min-h-0">
           {!hasGraphRoot ? (
             <RootRequired view={graphView} />
+          ) : traceRootIsContainer ? (
+            <TraceNeedsSymbol view={graphView} />
           ) : graphQuery.isError ? (
             <GraphError />
           ) : (
