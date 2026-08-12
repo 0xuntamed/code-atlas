@@ -1,4 +1,6 @@
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- SQLite schema. Timestamps are stored as INTEGER Unix microseconds (UTC),
+-- booleans as INTEGER 0/1, and JSON metadata as TEXT. Foreign keys are enforced
+-- via the foreign_keys pragma set on every pooled connection (see store.Open).
 
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -8,11 +10,11 @@ CREATE TABLE IF NOT EXISTS projects (
     remote_url TEXT NOT NULL DEFAULT '',
     git_ref TEXT NOT NULL DEFAULT '',
     current_commit TEXT NOT NULL DEFAULT '',
-    managed_clone BOOLEAN NOT NULL DEFAULT FALSE,
+    managed_clone INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued',
-    active_run_id TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    active_run_id TEXT REFERENCES analysis_runs(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS analysis_runs (
@@ -24,17 +26,11 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     total INTEGER NOT NULL DEFAULT 0,
     message TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
-    lease_until TIMESTAMPTZ,
-    started_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    lease_until INTEGER,
+    started_at INTEGER,
+    completed_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT 0
 );
-
-ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_active_run_id_fkey;
-ALTER TABLE projects
-    ADD CONSTRAINT projects_active_run_id_fkey
-    FOREIGN KEY (active_run_id) REFERENCES analysis_runs(id) ON DELETE SET NULL
-    DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
@@ -44,9 +40,9 @@ CREATE TABLE IF NOT EXISTS files (
     language TEXT NOT NULL DEFAULT '',
     classification TEXT NOT NULL,
     ignore_reason TEXT NOT NULL DEFAULT '',
-    is_directory BOOLEAN NOT NULL DEFAULT FALSE,
-    is_test BOOLEAN NOT NULL DEFAULT FALSE,
-    size_bytes BIGINT NOT NULL DEFAULT 0,
+    is_directory INTEGER NOT NULL DEFAULT 0,
+    is_test INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
     content_hash TEXT NOT NULL DEFAULT '',
     UNIQUE (run_id, path)
 );
@@ -64,8 +60,8 @@ CREATE TABLE IF NOT EXISTS entities (
     start_column INTEGER NOT NULL DEFAULT 0,
     end_line INTEGER NOT NULL DEFAULT 0,
     end_column INTEGER NOT NULL DEFAULT 0,
-    is_test BOOLEAN NOT NULL DEFAULT FALSE,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    is_test INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS relationships (
@@ -75,14 +71,14 @@ CREATE TABLE IF NOT EXISTS relationships (
     source_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     target_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     relationship_type TEXT NOT NULL,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1,
+    confidence REAL NOT NULL DEFAULT 1,
     evidence_file_id TEXT REFERENCES files(id) ON DELETE SET NULL,
     start_line INTEGER NOT NULL DEFAULT 0,
     start_column INTEGER NOT NULL DEFAULT 0,
     end_line INTEGER NOT NULL DEFAULT 0,
     end_column INTEGER NOT NULL DEFAULT 0,
     resolution_state TEXT NOT NULL DEFAULT 'resolved',
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS analysis_runs_claim_idx
@@ -91,10 +87,11 @@ CREATE INDEX IF NOT EXISTS files_project_run_idx
     ON files (project_id, run_id, classification);
 CREATE INDEX IF NOT EXISTS entities_project_run_idx
     ON entities (project_id, run_id, kind);
-CREATE INDEX IF NOT EXISTS entities_qualified_name_trgm_idx
-    ON entities USING gin (qualified_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS entities_qualified_name_idx
+    ON entities (qualified_name);
+CREATE INDEX IF NOT EXISTS entities_name_idx
+    ON entities (name);
 CREATE INDEX IF NOT EXISTS relationships_source_idx
     ON relationships (project_id, run_id, source_entity_id, relationship_type);
 CREATE INDEX IF NOT EXISTS relationships_target_idx
     ON relationships (project_id, run_id, target_entity_id, relationship_type);
-

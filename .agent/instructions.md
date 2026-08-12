@@ -29,7 +29,7 @@ Preserve these core guarantees:
 - `internal/analyzer`: inventory and graph-analysis phases.
 - `internal/parser`: Tree-sitter adapters and the no-CGO fallback parser.
 - `internal/repository`: repository discovery, safe Git acquisition, hashing, and ignore rules.
-- `internal/store`: PostgreSQL persistence, migrations, jobs, search, and traversal.
+- `internal/store`: embedded SQLite persistence, migrations, jobs, search, and traversal.
 - `web/src/features`: frontend feature boundaries.
 - `web/src/styles`: design-system and feature styles.
 - `testdata`: parser and repository fixtures.

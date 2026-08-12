@@ -24,8 +24,8 @@ import (
 
 const (
 	defaultListenAddress = "127.0.0.1:7331"
-	defaultDatabaseURL   = "postgres://codeatlas:codeatlas@127.0.0.1:5433/codeatlas?sslmode=disable"
 	defaultServerURL     = "http://127.0.0.1:7331"
+	databaseFileName     = "codeatlas.db"
 
 	readHeaderTimeout = 5 * time.Second
 	idleTimeout       = 60 * time.Second
@@ -63,7 +63,7 @@ func run(args []string) error {
 func serve(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := flags.String("listen", env("CODEATLAS_LISTEN_ADDR", defaultListenAddress), "loopback listen address")
-	databaseURL := flags.String("database-url", env("CODEATLAS_DATABASE_URL", defaultDatabaseURL), "PostgreSQL connection URL")
+	databasePath := flags.String("database", env("CODEATLAS_DATABASE_PATH", ""), "SQLite database file path (defaults to <data-dir>/"+databaseFileName+")")
 	dataDir := flags.String("data-dir", env("CODEATLAS_DATA_DIR", defaultDataDir()), "local application data directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -71,10 +71,13 @@ func serve(args []string) error {
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+	if *databasePath == "" {
+		*databasePath = filepath.Join(*dataDir, databaseFileName)
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	database, err := store.Open(ctx, *databaseURL)
+	database, err := store.Open(ctx, *databasePath)
 	if err != nil {
 		return err
 	}
@@ -99,7 +102,10 @@ func serve(args []string) error {
 			logger.Error("shut down HTTP server", "error", err)
 		}
 	}()
-	logger.Info("CodeAtlas ready", "url", "http://"+*listen, "data_dir", *dataDir)
+	if repo := flags.Arg(0); repo != "" {
+		go registerOnStart(ctx, "http://"+*listen, repo, logger)
+	}
+	logger.Info("CodeAtlas ready", "url", "http://"+*listen, "data_dir", *dataDir, "database", *databasePath)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve HTTP: %w", err)
 	}
@@ -146,6 +152,61 @@ func add(args []string) error {
 	}
 	fmt.Printf("Queued project %s (analysis %s)\n", created.ProjectID, created.AnalysisRunID)
 	return nil
+}
+
+// registerOnStart waits for the just-started local server to become healthy and
+// then registers the repository passed positionally to `serve`, so a first run
+// needs no separate `add` step.
+func registerOnStart(ctx context.Context, serverURL, repoPath string, logger *slog.Logger) {
+	absolute, err := filepath.Abs(repoPath)
+	if err != nil {
+		logger.Error("resolve repository path", "error", err)
+		return
+	}
+	base := strings.TrimRight(serverURL, "/")
+	client := &http.Client{Timeout: requestTimeout}
+	ready := false
+	for attempt := 0; attempt < 50; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		if response, err := client.Get(base + "/api/v1/health"); err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		logger.Error("register repository: server did not become ready", "path", absolute)
+		return
+	}
+	payload, err := json.Marshal(model.CreateProjectRequest{
+		Source: model.ProjectSource{Type: model.SourceLocal, Path: absolute},
+	})
+	if err != nil {
+		logger.Error("encode project request", "error", err)
+		return
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/projects", bytes.NewReader(payload))
+	if err != nil {
+		logger.Error("create project request", "error", err)
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		logger.Error("register repository", "error", err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		logger.Error("register repository rejected", "status", response.Status, "path", absolute)
+		return
+	}
+	logger.Info("registered repository", "path", absolute)
 }
 
 func env(name, fallback string) string {

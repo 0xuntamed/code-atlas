@@ -6,13 +6,12 @@ import (
 	"fmt"
 
 	"github.com/codeatlas/codeatlas/internal/model"
-	"github.com/jackc/pgx/v5"
 )
 
 const relationshipColumns = `r.id,r.project_id,r.run_id,r.source_entity_id,r.target_entity_id,r.relationship_type,
 	r.confidence,COALESCE(r.evidence_file_id,''),r.start_line,r.start_column,r.end_line,r.end_column,r.resolution_state,r.metadata`
 
-func scanRelationship(row pgx.Row) (model.Relationship, error) {
+func scanRelationship(row scanner) (model.Relationship, error) {
 	var r model.Relationship
 	var metadata []byte
 	err := row.Scan(&r.ID, &r.ProjectID, &r.RunID, &r.SourceID, &r.TargetID, &r.Kind, &r.Confidence, &r.EvidenceFileID,
@@ -34,7 +33,7 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 		return s.NeighborhoodGraph(ctx, projectID, scopeID, limit)
 	}
 
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+entityColumns+`,
 			count(DISTINCT file_entity.id) AS file_count,
 			count(DISTINCT file_entity.id) FILTER (WHERE file_entity.is_test) AS test_file_count,
@@ -54,10 +53,10 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 		LEFT JOIN entities symbol
 			ON symbol.run_id=e.run_id
 			AND symbol.file_id=file_entity.file_id
-		WHERE e.project_id=$1 AND e.kind='module'
+		WHERE e.project_id=? AND e.kind='module'
 		GROUP BY e.id,p.active_run_id
 		ORDER BY route_count DESC,symbol_count DESC,e.qualified_name
-		LIMIT $2`, projectID, limit+1)
+		LIMIT ?`, projectID, limit+1)
 	if err != nil {
 		return model.Graph{}, err
 	}
@@ -67,6 +66,7 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 	for rows.Next() {
 		var entity model.Entity
 		var metadata []byte
+		var isTest int
 		var fileCount, testFileCount, symbolCount, routeCount int
 		if err := rows.Scan(
 			&entity.ID,
@@ -81,7 +81,7 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 			&entity.Range.StartColumn,
 			&entity.Range.EndLine,
 			&entity.Range.EndColumn,
-			&entity.IsTest,
+			&isTest,
 			&metadata,
 			&fileCount,
 			&testFileCount,
@@ -143,36 +143,41 @@ func (s *Store) moduleEdges(ctx context.Context, projectID string, nodes []model
 	for index := range nodes {
 		moduleIDs[index] = nodes[index].ID
 	}
+	kinds := []string{"imports", "calls", "depends_on"}
 
-	rows, err := s.pool.Query(ctx, `
+	query := fmt.Sprintf(`
 		WITH module_files AS (
 			SELECT contains_edge.source_entity_id AS module_id,file_entity.file_id
 			FROM relationships contains_edge
 			JOIN projects p ON p.active_run_id=contains_edge.run_id
 			JOIN entities file_entity ON file_entity.id=contains_edge.target_entity_id
-			WHERE contains_edge.project_id=$1
-				AND contains_edge.source_entity_id=ANY($2)
+			WHERE contains_edge.project_id=?
+				AND contains_edge.source_entity_id IN (%s)
 				AND contains_edge.relationship_type='contains'
 		)
 		SELECT source_module.module_id,target_module.module_id,
 			rel.relationship_type,count(*) AS relationship_count,
 			avg(rel.confidence) AS confidence,
-			bool_and(rel.resolution_state='resolved') AS fully_resolved
+			min(CASE WHEN rel.resolution_state='resolved' THEN 1 ELSE 0 END) AS fully_resolved
 		FROM relationships rel
 		JOIN projects p ON p.active_run_id=rel.run_id
 		JOIN entities source_entity ON source_entity.id=rel.source_entity_id
 		JOIN entities target_entity ON target_entity.id=rel.target_entity_id
 		JOIN module_files source_module ON source_module.file_id=source_entity.file_id
 		JOIN module_files target_module ON target_module.file_id=target_entity.file_id
-		WHERE rel.project_id=$1
-			AND rel.relationship_type=ANY($3)
+		WHERE rel.project_id=?
+			AND rel.relationship_type IN (%s)
 			AND source_module.module_id<>target_module.module_id
 		GROUP BY source_module.module_id,target_module.module_id,rel.relationship_type
 		ORDER BY relationship_count DESC,source_module.module_id,target_module.module_id`,
-		projectID,
-		moduleIDs,
-		[]string{"imports", "calls", "depends_on"},
-	)
+		placeholders(len(moduleIDs)), placeholders(len(kinds)))
+
+	args := []any{projectID}
+	args = append(args, stringArgs(moduleIDs)...)
+	args = append(args, projectID)
+	args = append(args, stringArgs(kinds)...)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +187,7 @@ func (s *Store) moduleEdges(ctx context.Context, projectID string, nodes []model
 	for rows.Next() {
 		var edge model.Relationship
 		var count int
-		var fullyResolved bool
+		var fullyResolved int
 		if err := rows.Scan(
 			&edge.SourceID,
 			&edge.TargetID,
@@ -196,7 +201,7 @@ func (s *Store) moduleEdges(ctx context.Context, projectID string, nodes []model
 		edge.ID = fmt.Sprintf("aggregate:%s:%s:%s", edge.SourceID, edge.TargetID, edge.Kind)
 		edge.ProjectID = projectID
 		edge.Resolution = "inferred"
-		if fullyResolved {
+		if fullyResolved == 1 {
 			edge.Resolution = "resolved"
 		}
 		edge.Metadata = map[string]any{"aggregate": true, "relationshipCount": count}
@@ -228,40 +233,53 @@ func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	query := `
-		WITH RECURSIVE active AS (
-			SELECT active_run_id AS run_id FROM projects WHERE id=$1
-		), walk(node_id,depth,path) AS (
-			SELECT $2::text,0,ARRAY[$2::text]
+
+	// The next node reached along an edge, and the predicate that selects
+	// candidate edges, depend on the traversal direction. Entity IDs are hex,
+	// so a '/'-delimited path string is a safe cycle guard.
+	var nextExpr, joinPredicate string
+	switch direction {
+	case "upstream":
+		nextExpr = "r.source_entity_id"
+		joinPredicate = "r.target_entity_id = w.node_id"
+	case "downstream":
+		nextExpr = "r.target_entity_id"
+		joinPredicate = "r.source_entity_id = w.node_id"
+	default:
+		nextExpr = "CASE WHEN r.source_entity_id = w.node_id THEN r.target_entity_id ELSE r.source_entity_id END"
+		joinPredicate = "(r.source_entity_id = w.node_id OR r.target_entity_id = w.node_id)"
+	}
+
+	query := fmt.Sprintf(`
+		WITH RECURSIVE walk(node_id, depth, path) AS (
+			SELECT ?, 0, '/' || ? || '/'
 			UNION ALL
-			SELECT CASE
-				WHEN $3='upstream' THEN r.source_entity_id
-				WHEN $3='downstream' THEN r.target_entity_id
-				WHEN r.source_entity_id=w.node_id THEN r.target_entity_id ELSE r.source_entity_id END,
-				w.depth+1,
-				w.path || CASE
-				WHEN $3='upstream' THEN r.source_entity_id
-				WHEN $3='downstream' THEN r.target_entity_id
-				WHEN r.source_entity_id=w.node_id THEN r.target_entity_id ELSE r.source_entity_id END
+			SELECT %[1]s, w.depth + 1, w.path || %[1]s || '/'
 			FROM walk w
-			JOIN relationships r ON r.run_id=(SELECT run_id FROM active)
-				AND r.relationship_type=ANY($4)
-				AND (($3='upstream' AND r.target_entity_id=w.node_id)
-					OR ($3='downstream' AND r.source_entity_id=w.node_id)
-					OR ($3='both' AND (r.source_entity_id=w.node_id OR r.target_entity_id=w.node_id)))
-			WHERE w.depth<$5
-			AND NOT (CASE
-				WHEN $3='upstream' THEN r.source_entity_id
-				WHEN $3='downstream' THEN r.target_entity_id
-				WHEN r.source_entity_id=w.node_id THEN r.target_entity_id ELSE r.source_entity_id END)=ANY(w.path)
-		), selected AS (
-			SELECT node_id,min(depth) AS distance FROM walk GROUP BY node_id ORDER BY min(depth),node_id LIMIT $6
+			JOIN relationships r
+				ON r.run_id = (SELECT active_run_id FROM projects WHERE id = ?)
+			   AND r.relationship_type IN (%[2]s)
+			   AND %[3]s
+			WHERE w.depth < ?
+			  AND instr(w.path, '/' || %[1]s || '/') = 0
+		),
+		selected AS (
+			SELECT node_id, min(depth) AS distance
+			FROM walk GROUP BY node_id ORDER BY min(depth), node_id LIMIT ?
 		)
-		SELECT ` + entityColumns + `,selected.distance
-		FROM selected JOIN entities e ON e.id=selected.node_id
-		JOIN projects p ON p.active_run_id=e.run_id
-		WHERE e.project_id=$1 ORDER BY selected.distance,e.qualified_name`
-	rows, err := s.pool.Query(ctx, query, projectID, rootID, direction, kinds, depth, limit+1)
+		SELECT %[4]s, selected.distance
+		FROM selected
+		JOIN entities e ON e.id = selected.node_id
+		JOIN projects p ON p.active_run_id = e.run_id
+		WHERE e.project_id = ?
+		ORDER BY selected.distance, e.qualified_name`,
+		nextExpr, placeholders(len(kinds)), joinPredicate, entityColumns)
+
+	args := []any{rootID, rootID, projectID}
+	args = append(args, stringArgs(kinds)...)
+	args = append(args, depth, limit+1, projectID)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return model.Graph{}, fmt.Errorf("traverse graph: %w", err)
 	}
@@ -271,11 +289,13 @@ func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction
 	for rows.Next() {
 		var e model.Entity
 		var metadata []byte
+		var isTest int
 		err := rows.Scan(&e.ID, &e.ProjectID, &e.RunID, &e.FileID, &e.Kind, &e.Name, &e.QualifiedName, &e.Language,
-			&e.Range.StartLine, &e.Range.StartColumn, &e.Range.EndLine, &e.Range.EndColumn, &e.IsTest, &metadata, &e.Distance)
+			&e.Range.StartLine, &e.Range.StartColumn, &e.Range.EndLine, &e.Range.EndColumn, &isTest, &metadata, &e.Distance)
 		if err != nil {
 			return model.Graph{}, err
 		}
+		e.IsTest = isTest != 0
 		_ = json.Unmarshal(metadata, &e.Metadata)
 		if len(nodes) < limit {
 			nodes = append(nodes, e)
@@ -301,9 +321,18 @@ func (s *Store) edgesForNodes(ctx context.Context, projectID string, nodes []mod
 	for i := range nodes {
 		ids[i] = nodes[i].ID
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+relationshipColumns+` FROM relationships r JOIN projects p ON p.active_run_id=r.run_id
-		WHERE r.project_id=$1 AND r.source_entity_id=ANY($2) AND r.target_entity_id=ANY($2)
-		AND ($3::text[] IS NULL OR r.relationship_type=ANY($3)) ORDER BY r.relationship_type,r.id`, projectID, ids, kinds)
+	idList := placeholders(len(ids))
+	query := fmt.Sprintf(`SELECT %s FROM relationships r JOIN projects p ON p.active_run_id=r.run_id
+		WHERE r.project_id=? AND r.source_entity_id IN (%s) AND r.target_entity_id IN (%s)
+		AND r.relationship_type IN (%s) ORDER BY r.relationship_type,r.id`,
+		relationshipColumns, idList, idList, placeholders(len(kinds)))
+
+	args := []any{projectID}
+	args = append(args, stringArgs(ids)...)
+	args = append(args, stringArgs(ids)...)
+	args = append(args, stringArgs(kinds)...)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -2,7 +2,8 @@
 
 > A local-first **code-intelligence graph** for JavaScript, TypeScript, Go, and Python.
 > It parses a repository with Tree-sitter, stores **metadata only** (never source) in
-> PostgreSQL, and serves an embedded React graph explorer. Everything binds to loopback.
+> an embedded SQLite database, and serves an embedded React graph explorer. It ships as a
+> single self-contained binary with no external database, and everything binds to loopback.
 
 This document explains what CodeAtlas is, the features it exposes, how the pieces fit
 together, and — in detail — how data flows from a repository on disk to the interactive
@@ -40,7 +41,7 @@ Two design commitments shape everything:
 | **Architecture explorer** | Progressive disclosure: module overview → module neighborhood → file declarations. Never flattens the whole repo onto one canvas. | `store/graph.go`, `web/src/features/graph/*` |
 | **Flow view** | From a selected symbol, traces **downstream** execution (`calls`, `handles_route`, `uses_middleware`). | `store.FlowGraph` |
 | **Impact view** | From a selected symbol, traces the **change blast radius** upstream/downstream. | `store.ImpactGraph` |
-| **Symbol search** | Trigram-backed fuzzy search over qualified names. | `store.Search` (`pg_trgm`) |
+| **Symbol search** | Substring fuzzy search over qualified names. | `store.Search` (`LIKE`) |
 | **Verified source evidence** | On demand, re-reads a symbol's source window from disk, but only if the file hash still matches analysis time. | `api/source.go` |
 | **Skipped-file inspector** | Explains every visited exclusion; ignored directories are recorded once, not enumerated. | `web/src/features/files/SkippedFiles.tsx` |
 | **Signal filters** | Hide test code and "reference noise" (external/unresolved symbols) by default; toggle to reveal. | `web/src/lib/graph.ts`, `store.ts` |
@@ -62,7 +63,7 @@ Two design commitments shape everything:
                           │                                                │               │
                    ┌──────▼───────┐                               ┌────────▼───────┐  ┌────▼─────┐
                    │  analyzer    │  claims queued runs, runs     │     store      │  │  webui   │
-                   │  (job loop)  │  the pipeline, writes graph   │  (PostgreSQL)  │  │ go:embed │
+                   │  (job loop)  │  the pipeline, writes graph   │    (SQLite)    │  │ go:embed │
                    └──────┬───────┘                               └────────────────┘  └──────────┘
               ┌───────────┼────────────┐
         ┌─────▼────┐ ┌────▼─────┐ ┌────▼──────┐
@@ -73,7 +74,7 @@ Two design commitments shape everything:
 ```
 
 The analyzer and the API server run in the **same process** (`cmd/codeatlas serve`) but on
-separate goroutines. They communicate only through PostgreSQL — the analyzer is a durable
+separate goroutines. They communicate only through the SQLite database — the analyzer is a durable
 job worker, and the API never calls the analyzer directly.
 
 ### Package map (`internal/`)
@@ -85,7 +86,7 @@ job worker, and the API never calls the analyzer directly.
 | `parser` | Tree-sitter adapters (`//go:build cgo`) and a structural fallback (`parser_fallback.go`). Returns a `ParseResult` of entity/import/reference *seeds*. |
 | `analyzer` | The orchestrator: job loop + the graph-building pipeline. |
 | `id` | Deterministic stable IDs (`id.Stable(runID, parts...)`) so re-analysis is reproducible. |
-| `store` | All PostgreSQL access: schema/migrate, durable job lease, atomic promotion, search, and graph traversal via recursive CTEs. |
+| `store` | All SQLite access (pure-Go `modernc.org/sqlite`): schema/migrate, durable job lease, atomic promotion, search, and graph traversal via recursive CTEs. |
 | `api` | Loopback security, project lifecycle, SSE, graph handlers, source evidence, shutdown. |
 | `webui` | `//go:embed dist/*` — serves the built SPA and falls back to `index.html` for client routes. |
 
@@ -99,7 +100,7 @@ atomically promoted. (Schema: `internal/store/schema.sql`.)
 
 ```
 projects ──1:N──▶ analysis_runs
-   │  active_run_id (deferrable FK) ─────┐
+   │  active_run_id (nullable FK) ───────┐
    │                                     ▼
    └──────────── files ─────────── entities ─────────── relationships
                  (run_id)          (run_id, file_id)     (run_id, source→target)
@@ -112,7 +113,7 @@ projects ──1:N──▶ analysis_runs
   `ignore_reason`, `language`, `is_test`, `size_bytes`, and `content_hash` (kept server-side
   only — JSON-hidden).
 - **`entities`** — nodes. `kind` ∈ `EntityKinds`, plus `qualified_name`, source `range`, and
-  a JSONB `metadata` bag.
+  a JSON `metadata` bag (TEXT column).
 - **`relationships`** — edges. `relationship_type` ∈ `RelationshipKinds`, plus `confidence`,
   `resolution_state` (`resolved`/`inferred`/`external`/`unresolved`), and evidence range.
 
@@ -123,9 +124,11 @@ projects ──1:N──▶ analysis_runs
 - Relationship kinds: `contains, defines, imports, exports, calls, handles_route,
   uses_middleware, depends_on`.
 
-Key indexes: a claim index on `(status, lease_until, created_at)`, a GIN **trigram** index on
-`entities.qualified_name` for fuzzy search, and source/target indexes on relationships for
-fast traversal.
+Timestamps are stored as INTEGER Unix microseconds (UTC) and booleans as INTEGER 0/1.
+
+Key indexes: a claim index on `(status, lease_until, created_at)`, an index on
+`entities.qualified_name` backing the `LIKE` substring search, and source/target indexes on
+relationships for fast traversal.
 
 ---
 
@@ -138,7 +141,7 @@ This is how a repository on disk becomes a graph in the database. Entry point:
 flowchart TD
     A["POST /projects or CLI 'add'"] --> B["store.CreateProject<br/>project + queued run"]
     B --> C{"analyzer.Run loop<br/>tick every 650ms"}
-    C -->|"ClaimRun: FOR UPDATE SKIP LOCKED"| D["acquire<br/>local path or git clone"]
+    C -->|"ClaimRun: lease oldest queued run"| D["acquire<br/>local path or git clone"]
     D --> E["discover<br/>walk, classify, hash sources"]
     E --> F["parse (worker pool, ≤8)<br/>tree-sitter → ParseResult seeds"]
     F --> G["buildGraph<br/>5 phases → entities + relationships"]
@@ -153,8 +156,10 @@ flowchart TD
 **Stage by stage:**
 
 1. **Claim** — `store.ClaimRun` selects the oldest `queued` run (or a `running` run whose
-   45-second `lease_until` expired) with `FOR UPDATE SKIP LOCKED`, so multiple workers never
-   grab the same job and a crashed run is safely re-claimed. Each `UpdateRun` renews the lease.
+   45-second `lease_until` expired) inside a transaction. A single embedded worker runs the
+   loop, so there is no cross-worker contention; the `lease_until` heartbeat exists so a run
+   left `running` by a crash is safely re-claimed on the next start. Each `UpdateRun` renews
+   the lease.
 2. **Acquire** (`repository.Acquire`) — for local projects this validates the path; for git
    it performs a managed clone using the local credential helper / SSH agent. Returns the
    resolved commit.
@@ -193,8 +198,8 @@ flowchart TD
    (`1.0 → 0.72`). IDs are deterministic (`id.Stable`), so identical input yields identical
    graphs. Finally entities are sorted and relationships de-duplicated.
 6. **Persist** (`store.ReplaceRunData`) — inside one transaction: delete any prior rows for this
-   run, then bulk-load files, entities, and relationships with `COPY`. `content_hash` is written
-   here; `metadata` is JSON-encoded.
+   run, then insert files, entities, and relationships via batched prepared statements.
+   `content_hash` is written here; `metadata` is JSON-encoded into a TEXT column.
 7. **Promote** (`store.PromoteRun`) — atomically flips the run to `ready` and sets the project's
    `active_run_id`. **Failed or partial runs never replace the last valid graph** — `FailRun`
    only marks the run failed (with a path-sanitized message) and leaves the previous
@@ -353,17 +358,18 @@ client-side routes.
 ## 10. Build, run, and test
 
 ```powershell
-# Prerequisites: Go 1.26+, Node 22.12+ (or 20.19+), Docker, Git, (optional) a C toolchain.
+# Prerequisites: Go 1.26+, Node 22.12+ (or 20.19+), Git, (optional) a C toolchain.
+# No Docker or external database — metadata lives in an embedded SQLite file.
 
-docker compose up -d postgres     # PostgreSQL on loopback :5433
 cd web && npm install && npm run build && cd ..   # writes internal/webui/dist
 go run ./cmd/codeatlas serve       # http://127.0.0.1:7331
 ```
 
-Register a repo from the UI, or from a second terminal:
+Register a repo from the UI, from a second terminal, or directly on startup:
 
 ```powershell
-go run ./cmd/codeatlas add C:\absolute\path\to\repo
+go run ./cmd/codeatlas serve C:\absolute\path\to\repo   # register on first launch
+go run ./cmd/codeatlas add C:\absolute\path\to\repo     # against a running server
 ```
 
 Frontend dev loop (Vite proxies `/api` to the Go server):
@@ -381,7 +387,7 @@ go vet ./cmd/... ./internal/...
 cd web && npm run check && npm run build   # tsc + eslint + vitest + prettier, then build
 ```
 
-Configuration (env vars): `CODEATLAS_DATABASE_URL`, `CODEATLAS_LISTEN_ADDR`,
+Configuration (env vars): `CODEATLAS_DATABASE_PATH`, `CODEATLAS_LISTEN_ADDR`,
 `CODEATLAS_DATA_DIR`.
 
 > **Note:** `internal/webui/dist` is the built SPA embedded via `go:embed`, and
