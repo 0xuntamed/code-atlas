@@ -26,11 +26,90 @@ function allowed(direction: ImpactDirection, filter: ImpactFilter): boolean {
   return direction === 'dependency'
 }
 
+// The file a symbol belongs to, taken from the qualified name prefix
+// ("src/orders.ts::fetchOrders" → "src/orders.ts").
+function fileKey(entity: Entity): string | undefined {
+  const marker = entity.qualifiedName.indexOf('::')
+  return marker > 0 ? entity.qualifiedName.slice(0, marker) : undefined
+}
+
+function aggregateDirection(members: Entity[], directionById: Map<string, ImpactDirection>) {
+  let dependent = false
+  let dependency = false
+  for (const member of members) {
+    const direction = directionById.get(member.id)
+    if (direction === 'dependent') dependent = true
+    else if (direction === 'dependency') dependency = true
+    else if (direction === 'both') {
+      dependent = true
+      dependency = true
+    }
+  }
+  if (dependent && dependency) return 'both' as const
+  return dependent ? ('dependent' as const) : ('dependency' as const)
+}
+
+// rollupByFile collapses each file's affected symbols into one "N affected" file
+// node, so the blast radius reads at file level by default. Expanding a file key
+// reveals its individual symbols again.
+function rollupByFile(
+  graph: GraphResponse,
+  directionById: Map<string, ImpactDirection>,
+  rootId: string,
+  expanded: Set<string>,
+): { graph: GraphResponse; directionById: Map<string, ImpactDirection> } {
+  const groupable = (node: Entity) =>
+    directionById.has(node.id) &&
+    node.id !== rootId &&
+    node.kind !== 'file' &&
+    node.kind !== 'module' &&
+    node.kind !== 'package' &&
+    Boolean(fileKey(node))
+
+  const members = new Map<string, Entity[]>()
+  for (const node of graph.nodes) {
+    if (!groupable(node)) continue
+    const key = fileKey(node) as string
+    const list = members.get(key) ?? []
+    list.push(node)
+    members.set(key, list)
+  }
+
+  const hidden = new Set<string>()
+  const groupNodes: Entity[] = []
+  const nextDirection = new Map(directionById)
+  for (const [key, list] of members) {
+    if (list.length < 2 || expanded.has(key)) continue
+    const direction = aggregateDirection(list, directionById)
+    for (const member of list) {
+      hidden.add(member.id)
+      nextDirection.delete(member.id)
+    }
+    const id = `group:${key}`
+    groupNodes.push({
+      ...list[0],
+      id,
+      kind: 'file',
+      name: key.split('/').pop() ?? key,
+      qualifiedName: key,
+      fileId: undefined,
+      direction,
+      metadata: { group: true, groupKey: key, affectedCount: list.length },
+    })
+    nextDirection.set(id, direction)
+  }
+
+  if (groupNodes.length === 0) return { graph, directionById }
+
+  const nodes = graph.nodes.filter((node) => !hidden.has(node.id)).concat(groupNodes)
+  const edges = graph.edges.filter((edge) => !hidden.has(edge.source) && !hidden.has(edge.target))
+  return { graph: { ...graph, nodes, edges }, directionById: nextDirection }
+}
+
 // useWorkspaceGraph owns the workspace's server state: an always-on structural
 // base map, plus the blast radius of whatever node is selected — merged onto the
-// base map as a color-coded overlay. Selecting a node is all it takes; there is
-// no mode to toggle.
-export function useWorkspaceGraph(project: Project): WorkspaceGraph {
+// base map as a color-coded overlay, rolled up to file level by default.
+export function useWorkspaceGraph(project: Project, expandedFiles: Set<string>): WorkspaceGraph {
   const selectedEntityId = useAtlasStore((state) => state.selectedEntityId)
   const impactFilter = useAtlasStore((state) => state.impactFilter)
   const scopePath = useAtlasStore((state) => state.scopePath)
@@ -62,8 +141,6 @@ export function useWorkspaceGraph(project: Project): WorkspaceGraph {
     const impact = selectedEntityId ? impactQuery.data : undefined
     const directionById = new Map<string, ImpactDirection>()
 
-    // Union the blast radius onto the base map. Nodes keep their base position as
-    // context; overlay-only nodes join if their direction passes the filter.
     let merged = base
     if (base && impact) {
       const nodeById = new Map(base.nodes.map((node) => [node.id, node]))
@@ -96,23 +173,29 @@ export function useWorkspaceGraph(project: Project): WorkspaceGraph {
       selectedEntityId,
     )
 
-    // Keep only direction tags whose node survived filtering, and collect the
-    // edges that run inside the blast radius.
+    let displayGraph = filtered.graph
+    let dirMap = directionById
+    if (displayGraph) {
+      const visible = new Set(displayGraph.nodes.map((node) => node.id))
+      for (const id of [...dirMap.keys()]) if (!visible.has(id)) dirMap.delete(id)
+      if (impactActive) {
+        const rolled = rollupByFile(displayGraph, dirMap, selectedEntityId, expandedFiles)
+        displayGraph = rolled.graph
+        dirMap = rolled.directionById
+      }
+    }
+
     const impactEdgeIds = new Set<string>()
-    if (filtered.graph) {
-      const visible = new Set(filtered.graph.nodes.map((node) => node.id))
-      for (const id of [...directionById.keys()]) if (!visible.has(id)) directionById.delete(id)
-      for (const edge of filtered.graph.edges) {
-        if (directionById.has(edge.source) && directionById.has(edge.target)) {
-          impactEdgeIds.add(edge.id)
-        }
+    if (displayGraph) {
+      for (const edge of displayGraph.edges) {
+        if (dirMap.has(edge.source) && dirMap.has(edge.target)) impactEdgeIds.add(edge.id)
       }
     }
 
     return {
-      displayGraph: filtered.graph,
+      displayGraph,
       hiddenTotal: filtered.hiddenTotal,
-      directionById,
+      directionById: dirMap,
       impactEdgeIds,
       impactActive,
       selectedEntity,
@@ -123,6 +206,7 @@ export function useWorkspaceGraph(project: Project): WorkspaceGraph {
     baseQuery.data,
     baseQuery.isError,
     baseQuery.isLoading,
+    expandedFiles,
     impactQuery.data,
     impactFilter,
     selectedEntity,

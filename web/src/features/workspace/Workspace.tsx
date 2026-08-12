@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api'
 import { useAtlasStore } from '../../store'
@@ -46,7 +47,23 @@ function ReadyWorkspace({ project }: { project: Project }) {
   const toggleReferences = useAtlasStore((state) => state.toggleReferences)
   const resetSelection = useAtlasStore((state) => state.resetSelection)
 
-  const graph = useWorkspaceGraph(project)
+  // File-group expansion is ephemeral view state; a new selection resets it,
+  // tracking the previous selection in state per React's "reset on change" pattern.
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
+  const [lastSelection, setLastSelection] = useState(selectedEntityId)
+  if (lastSelection !== selectedEntityId) {
+    setLastSelection(selectedEntityId)
+    setExpandedFiles(new Set())
+  }
+  const toggleGroup = (key: string) =>
+    setExpandedFiles((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  const graph = useWorkspaceGraph(project, expandedFiles)
 
   // Drilling in only applies to containers; the canvas guards double-click too.
   const explore = (entity: Entity) => {
@@ -62,10 +79,12 @@ function ReadyWorkspace({ project }: { project: Project }) {
   return (
     <div className="relative grid h-[calc(100dvh-4rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden md:grid-cols-[17rem_minmax(0,1fr)] md:grid-rows-1 xl:grid-cols-[17rem_minmax(0,1fr)_22.5rem]">
       <WorkspaceSidebar
+        expandedCount={expandedFiles.size}
         graph={graph.displayGraph}
         hiddenTotal={graph.hiddenTotal}
         impactActive={graph.impactActive}
         impactFilter={impactFilter}
+        onCollapseFiles={() => setExpandedFiles(new Set())}
         onImpactFilterChange={setImpactFilter}
         onSelect={selectEntity}
         onToggleReferences={toggleReferences}
@@ -96,6 +115,7 @@ function ReadyWorkspace({ project }: { project: Project }) {
               impactEdgeIds={graph.impactEdgeIds}
               onExplore={exploreById}
               onSelect={selectEntity}
+              onToggleGroup={toggleGroup}
               selectedEntityId={selectedEntityId}
             />
           )}

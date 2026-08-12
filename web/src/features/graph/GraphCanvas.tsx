@@ -27,6 +27,7 @@ export function GraphCanvas({
   impactActive,
   onSelect,
   onExplore,
+  onToggleGroup,
 }: {
   graph?: GraphResponse
   hiddenCount: number
@@ -36,6 +37,7 @@ export function GraphCanvas({
   impactActive: boolean
   onSelect: (id: string) => void
   onExplore: (id: string) => void
+  onToggleGroup: (key: string) => void
 }) {
   const mode = impactActive ? 'impact' : 'structure'
   const deferredGraph = useDeferredValue(graph)
@@ -174,9 +176,14 @@ export function GraphCanvas({
       nodes={nodes}
       nodesConnectable={false}
       nodesDraggable={false}
-      onNodeClick={(_, node) => onSelect(node.id)}
+      onNodeClick={(_, node) => {
+        const groupKey = node.data.entity.metadata?.groupKey
+        if (typeof groupKey === 'string') onToggleGroup(groupKey)
+        else onSelect(node.id)
+      }}
       onNodeDoubleClick={(_, node) => {
         const entity = node.data.entity
+        if (entity.metadata?.group === true) return
         if (entity.kind === 'module' || entity.kind === 'file') onExplore(node.id)
       }}
       onlyRenderVisibleElements

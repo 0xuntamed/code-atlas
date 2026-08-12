@@ -29,8 +29,11 @@ const directionClasses: Record<ImpactDirection, string> = {
 export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<AtlasFlowNode>) {
   const { entity, compact, direction, impactDirection, dimmed } = data
   const meta = kindMeta(entity.kind)
+  const isGroup = entity.metadata?.group === true
+  const affectedCount =
+    typeof entity.metadata?.affectedCount === 'number' ? entity.metadata.affectedCount : 0
   const expandable = entity.kind === 'module' || entity.kind === 'file'
-  const stats = moduleStats(entity)
+  const stats = isGroup ? `${affectedCount} affected · expand` : moduleStats(entity)
   const targetPosition = direction === 'vertical' ? Position.Top : Position.Left
   const sourcePosition = direction === 'vertical' ? Position.Bottom : Position.Right
   const emphasis = impactDirection
@@ -63,7 +66,12 @@ export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<A
             {entity.name}
           </strong>
         </div>
-        {expandable ? (
+        {isGroup ? (
+          <Icon
+            className="size-3.5 shrink-0 rotate-90 opacity-60 transition-transform group-hover:translate-y-0.5"
+            name="chevron-right"
+          />
+        ) : expandable ? (
           <Icon
             className="size-3.5 shrink-0 opacity-45 transition-transform group-hover:translate-x-0.5"
             name="chevron-right"

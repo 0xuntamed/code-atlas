@@ -14,6 +14,7 @@ export function WorkspaceSidebar({
   projectId,
   impactFilter,
   impactActive,
+  expandedCount,
   graph,
   hiddenTotal,
   showTests,
@@ -22,10 +23,12 @@ export function WorkspaceSidebar({
   onToggleTests,
   onToggleReferences,
   onImpactFilterChange,
+  onCollapseFiles,
 }: {
   projectId: string
   impactFilter: ImpactFilter
   impactActive: boolean
+  expandedCount: number
   graph?: GraphResponse
   hiddenTotal: number
   showTests: boolean
@@ -34,6 +37,7 @@ export function WorkspaceSidebar({
   onToggleTests: () => void
   onToggleReferences: () => void
   onImpactFilterChange: (filter: ImpactFilter) => void
+  onCollapseFiles: () => void
 }) {
   return (
     <aside className="min-h-0 overflow-y-auto border-b border-border bg-canvas-raised/72 p-3 md:border-b-0 md:border-r md:p-4">
@@ -66,6 +70,19 @@ export function WorkspaceSidebar({
               })}
             </div>
             <ImpactLegend className="mt-3 px-1" />
+            {expandedCount > 0 ? (
+              <button
+                className="mt-3 w-full rounded-lg border border-border bg-panel px-2 py-1.5 text-[10px] font-semibold text-muted transition-colors hover:text-foreground"
+                onClick={onCollapseFiles}
+                type="button"
+              >
+                Collapse {expandedCount} expanded file{expandedCount > 1 ? 's' : ''}
+              </button>
+            ) : (
+              <p className="mt-2 px-1 text-[9px] leading-4 text-dim">
+                Affected files group their symbols — click a file node to expand.
+              </p>
+            )}
           </>
         ) : (
           <p className="mt-2 px-1 text-[10px] leading-4 text-muted">
