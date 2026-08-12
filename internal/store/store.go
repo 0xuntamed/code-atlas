@@ -520,6 +520,20 @@ func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
+// scanIDs collects a single TEXT id column from a result set and closes it.
+func scanIDs(rows *sql.Rows) ([]string, error) {
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // stringArgs converts a []string to []any for variadic query arguments.
 func stringArgs(values []string) []any {
 	args := make([]any, len(values))

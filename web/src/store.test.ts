@@ -6,7 +6,7 @@ describe('atlas workspace state', () => {
     useAtlasStore.setState({
       projectId: '',
       selectedEntityId: '',
-      lens: 'structure',
+      impactFilter: 'both',
       scopePath: [],
       showTests: false,
       showReferences: false,
@@ -17,24 +17,24 @@ describe('atlas workspace state', () => {
     const store = useAtlasStore.getState()
     store.setProject('project-a')
     store.selectEntity('entity-a')
-    store.setLens('impact')
+    store.setImpactFilter('dependents')
     store.openScope({ id: 'mod', name: 'mod', kind: 'module' })
     store.setProject('project-b')
     expect(useAtlasStore.getState()).toMatchObject({
       projectId: 'project-b',
       selectedEntityId: '',
-      lens: 'structure',
+      impactFilter: 'both',
       scopePath: [],
     })
   })
 
-  it('keeps explicit signal filters across lenses', () => {
+  it('keeps explicit signal filters while changing the impact filter', () => {
     const store = useAtlasStore.getState()
     store.toggleTests()
     store.toggleReferences()
-    store.setLens('flow')
+    store.setImpactFilter('dependencies')
     expect(useAtlasStore.getState()).toMatchObject({
-      lens: 'flow',
+      impactFilter: 'dependencies',
       showTests: true,
       showReferences: true,
     })

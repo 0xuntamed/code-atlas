@@ -3,32 +3,45 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import { Icon } from '../../components/Icon'
 import { kindMeta } from '../../lib/entityKinds'
 import { entityKindLabel } from '../../lib/graph'
-import type { Entity } from '../../types'
+import type { Entity, ImpactDirection } from '../../types'
 
 export type AtlasFlowNode = Node<
   {
     entity: Entity
     compact: boolean
     direction: 'horizontal' | 'vertical'
-    // Lens state: highlighted nodes are on the traced subgraph; dimmed nodes are
-    // surrounding context when a lens is active.
-    highlighted?: boolean
+    // Blast-radius role when a node is selected; dimmed nodes are outside it.
+    impactDirection?: ImpactDirection
     dimmed?: boolean
   },
   'atlas'
 >
 
+// Border + ring per blast-radius role: the changed node, what breaks (dependents),
+// and what it relies on (dependencies).
+const directionClasses: Record<ImpactDirection, string> = {
+  root: '!border-primary ring-2 ring-primary/45',
+  dependent: '!border-rose-400 ring-2 ring-rose-400/40',
+  dependency: '!border-sky-400 ring-2 ring-sky-400/40',
+  both: '!border-violet-400 ring-2 ring-violet-400/40',
+}
+
 export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<AtlasFlowNode>) {
-  const { entity, compact, direction, highlighted, dimmed } = data
+  const { entity, compact, direction, impactDirection, dimmed } = data
   const meta = kindMeta(entity.kind)
   const expandable = entity.kind === 'module' || entity.kind === 'file'
   const stats = moduleStats(entity)
   const targetPosition = direction === 'vertical' ? Position.Top : Position.Left
   const sourcePosition = direction === 'vertical' ? Position.Bottom : Position.Right
+  const emphasis = impactDirection
+    ? directionClasses[impactDirection]
+    : selected
+      ? '!border-primary ring-2 ring-primary/30 shadow-[0_18px_45px_oklch(0.03_0.01_244/0.6)]'
+      : ''
 
   return (
     <article
-      className={`group relative w-[214px] rounded-card border bg-panel-raised px-3.5 py-3 shadow-[0_10px_30px_oklch(0.03_0.01_244/0.45)] transition-[border-color,box-shadow,opacity,transform] ${meta.tone} ${selected ? '!border-primary ring-2 ring-primary/30 shadow-[0_18px_45px_oklch(0.03_0.01_244/0.6)]' : highlighted ? 'ring-2 ring-primary/25' : ''} ${dimmed ? 'opacity-30' : entity.distance && entity.distance > 3 ? 'opacity-75' : ''} ${compact ? 'py-2.5' : ''}`}
+      className={`group relative w-[214px] rounded-card border bg-panel-raised px-3.5 py-3 shadow-[0_10px_30px_oklch(0.03_0.01_244/0.45)] transition-[border-color,box-shadow,opacity,transform] ${meta.tone} ${emphasis} ${dimmed ? 'opacity-25' : entity.distance && entity.distance > 3 ? 'opacity-75' : ''} ${compact ? 'py-2.5' : ''}`}
     >
       <Handle
         className="!size-2.5 !border-2 !border-canvas !bg-panel-raised transition-colors group-hover:!bg-primary"

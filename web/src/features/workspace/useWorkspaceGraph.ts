@@ -1,29 +1,38 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api'
-import { isTraceable } from '../../lib/entityKinds'
 import { filterGraph } from '../../lib/graph'
 import { useAtlasStore } from '../../store'
-import type { Entity, GraphResponse, Project } from '../../types'
+import type { Entity, GraphResponse, ImpactDirection, ImpactFilter, Project } from '../../types'
 
 export interface WorkspaceGraph {
   displayGraph?: GraphResponse
   hiddenTotal: number
-  highlightNodeIds: Set<string>
-  highlightEdgeIds: Set<string>
-  // True only when an overlay is actually loaded and merged onto the base map.
-  lensActive: boolean
+  // Blast-radius role per node id (root / dependent / dependency / both).
+  directionById: Map<string, ImpactDirection>
+  // Edge ids that run between two nodes in the blast radius.
+  impactEdgeIds: Set<string>
+  // True when a selection's blast radius is loaded and overlaid.
+  impactActive: boolean
   selectedEntity?: Entity
   isError: boolean
   isLoading: boolean
 }
 
-// useWorkspaceGraph owns the workspace's server state: one always-on structural
-// base map, plus a selection-driven flow/impact overlay merged onto it as a
-// highlight layer. Splitting this out keeps the workspace component presentational.
+function allowed(direction: ImpactDirection, filter: ImpactFilter): boolean {
+  if (direction === 'root' || direction === 'both') return true
+  if (filter === 'both') return true
+  if (filter === 'dependents') return direction === 'dependent'
+  return direction === 'dependency'
+}
+
+// useWorkspaceGraph owns the workspace's server state: an always-on structural
+// base map, plus the blast radius of whatever node is selected — merged onto the
+// base map as a color-coded overlay. Selecting a node is all it takes; there is
+// no mode to toggle.
 export function useWorkspaceGraph(project: Project): WorkspaceGraph {
   const selectedEntityId = useAtlasStore((state) => state.selectedEntityId)
-  const lens = useAtlasStore((state) => state.lens)
+  const impactFilter = useAtlasStore((state) => state.impactFilter)
   const scopePath = useAtlasStore((state) => state.scopePath)
   const showTests = useAtlasStore((state) => state.showTests)
   const showReferences = useAtlasStore((state) => state.showReferences)
@@ -34,8 +43,6 @@ export function useWorkspaceGraph(project: Project): WorkspaceGraph {
     queryFn: ({ signal }) => api.architecture(project.id, scopeId, signal),
   })
 
-  // Resolve the selected entity: prefer one already present on the base map,
-  // otherwise fetch it (e.g. a symbol chosen from search that isn't on-canvas).
   const entityInBase = baseQuery.data?.nodes.find((node) => node.id === selectedEntityId)
   const entityQuery = useQuery({
     queryKey: ['entity', project.id, selectedEntityId],
@@ -44,71 +51,70 @@ export function useWorkspaceGraph(project: Project): WorkspaceGraph {
   })
   const selectedEntity = entityInBase ?? entityQuery.data
 
-  const traceable = isTraceable(selectedEntity?.kind)
-  const overlayRequested = lens !== 'structure' && traceable && Boolean(selectedEntityId)
-
-  const overlayQuery = useQuery({
-    queryKey: ['graph', project.id, project.activeRunId, lens, selectedEntityId],
-    queryFn: ({ signal }) =>
-      lens === 'flow'
-        ? api.flow(project.id, selectedEntityId, signal)
-        : api.impact(project.id, selectedEntityId, signal),
-    enabled: overlayRequested,
+  const impactQuery = useQuery({
+    queryKey: ['impact-map', project.id, project.activeRunId, selectedEntityId],
+    queryFn: ({ signal }) => api.impactMap(project.id, selectedEntityId, signal),
+    enabled: Boolean(selectedEntityId),
   })
 
   return useMemo(() => {
     const base = baseQuery.data
-    const overlay = overlayRequested ? overlayQuery.data : undefined
-    const highlightNodeIds = new Set<string>()
-    const highlightEdgeIds = new Set<string>()
+    const impact = selectedEntityId ? impactQuery.data : undefined
+    const directionById = new Map<string, ImpactDirection>()
 
-    // Union the overlay onto the base map; the overlay's members become the
-    // highlighted subgraph, everything else stays as dimmed context.
+    // Union the blast radius onto the base map. Nodes keep their base position as
+    // context; overlay-only nodes join if their direction passes the filter.
     let merged = base
-    if (base && overlay) {
+    if (base && impact) {
       const nodeById = new Map(base.nodes.map((node) => [node.id, node]))
-      for (const node of overlay.nodes) {
-        nodeById.set(node.id, node)
-        highlightNodeIds.add(node.id)
-      }
       const edgeById = new Map(base.edges.map((edge) => [edge.id, edge]))
-      for (const edge of overlay.edges) {
-        edgeById.set(edge.id, edge)
-        highlightEdgeIds.add(edge.id)
+      for (const node of impact.nodes) {
+        const direction = (node.direction ?? 'dependency') as ImpactDirection
+        const pass = allowed(direction, impactFilter)
+        if (nodeById.has(node.id) || pass) nodeById.set(node.id, node)
+        if (pass) directionById.set(node.id, direction)
       }
+      for (const edge of impact.edges) edgeById.set(edge.id, edge)
       merged = {
         ...base,
         nodes: [...nodeById.values()],
         edges: [...edgeById.values()],
-        rootId: overlay.rootId ?? base.rootId,
+        rootId: impact.rootId ?? base.rootId,
       }
-    } else if (overlay) {
-      merged = overlay
-      overlay.nodes.forEach((node) => highlightNodeIds.add(node.id))
-      overlay.edges.forEach((edge) => highlightEdgeIds.add(edge.id))
+    } else if (impact) {
+      merged = impact
+      for (const node of impact.nodes) {
+        const direction = (node.direction ?? 'dependency') as ImpactDirection
+        if (allowed(direction, impactFilter)) directionById.set(node.id, direction)
+      }
     }
 
-    const lensActive = Boolean(overlay)
+    const impactActive = Boolean(impact) && directionById.size > 0
     const filtered = filterGraph(
       merged,
-      { showTests, showReferences: showReferences || lensActive },
+      { showTests, showReferences: showReferences || impactActive },
       selectedEntityId,
     )
 
-    // A highlight is meaningful only if its node/edge survived filtering.
+    // Keep only direction tags whose node survived filtering, and collect the
+    // edges that run inside the blast radius.
+    const impactEdgeIds = new Set<string>()
     if (filtered.graph) {
-      const visibleNodes = new Set(filtered.graph.nodes.map((node) => node.id))
-      for (const id of [...highlightNodeIds]) if (!visibleNodes.has(id)) highlightNodeIds.delete(id)
-      const visibleEdges = new Set(filtered.graph.edges.map((edge) => edge.id))
-      for (const id of [...highlightEdgeIds]) if (!visibleEdges.has(id)) highlightEdgeIds.delete(id)
+      const visible = new Set(filtered.graph.nodes.map((node) => node.id))
+      for (const id of [...directionById.keys()]) if (!visible.has(id)) directionById.delete(id)
+      for (const edge of filtered.graph.edges) {
+        if (directionById.has(edge.source) && directionById.has(edge.target)) {
+          impactEdgeIds.add(edge.id)
+        }
+      }
     }
 
     return {
       displayGraph: filtered.graph,
       hiddenTotal: filtered.hiddenTotal,
-      highlightNodeIds,
-      highlightEdgeIds,
-      lensActive,
+      directionById,
+      impactEdgeIds,
+      impactActive,
       selectedEntity,
       isError: baseQuery.isError,
       isLoading: baseQuery.isLoading,
@@ -117,8 +123,8 @@ export function useWorkspaceGraph(project: Project): WorkspaceGraph {
     baseQuery.data,
     baseQuery.isError,
     baseQuery.isLoading,
-    overlayQuery.data,
-    overlayRequested,
+    impactQuery.data,
+    impactFilter,
     selectedEntity,
     selectedEntityId,
     showReferences,

@@ -1,18 +1,19 @@
-import { Icon, type IconName } from '../../components/Icon'
-import type { GraphResponse, Lens } from '../../types'
+import { Icon } from '../../components/Icon'
+import { ImpactLegend } from '../graph/ImpactLegend'
+import type { GraphResponse, ImpactFilter } from '../../types'
 import { SkippedFiles } from '../files/SkippedFiles'
 import { SymbolSearch } from '../search/SymbolSearch'
 
-const lensContent: Record<Lens, { icon: IconName; label: string; copy: string }> = {
-  structure: { icon: 'architecture', label: 'Structure', copy: 'Modules and symbols' },
-  flow: { icon: 'flow', label: 'Flow', copy: 'Downstream execution' },
-  impact: { icon: 'impact', label: 'Impact', copy: 'Change blast radius' },
-}
+const impactFilters: { value: ImpactFilter; label: string }[] = [
+  { value: 'both', label: 'Both' },
+  { value: 'dependents', label: 'Breaks' },
+  { value: 'dependencies', label: 'Relies on' },
+]
 
 export function WorkspaceSidebar({
   projectId,
-  activeLens,
-  lensEnabled,
+  impactFilter,
+  impactActive,
   graph,
   hiddenTotal,
   showTests,
@@ -20,12 +21,11 @@ export function WorkspaceSidebar({
   onSelect,
   onToggleTests,
   onToggleReferences,
-  onLensChange,
+  onImpactFilterChange,
 }: {
   projectId: string
-  activeLens: Lens
-  // Whether the overlay lenses can be applied (a traceable symbol is selected).
-  lensEnabled: boolean
+  impactFilter: ImpactFilter
+  impactActive: boolean
   graph?: GraphResponse
   hiddenTotal: number
   showTests: boolean
@@ -33,49 +33,46 @@ export function WorkspaceSidebar({
   onSelect: (id: string) => void
   onToggleTests: () => void
   onToggleReferences: () => void
-  onLensChange: (lens: Lens) => void
+  onImpactFilterChange: (filter: ImpactFilter) => void
 }) {
   return (
     <aside className="min-h-0 overflow-y-auto border-b border-border bg-canvas-raised/72 p-3 md:border-b-0 md:border-r md:p-4">
       <SymbolSearch projectId={projectId} showTests={showTests} onSelect={onSelect} />
 
       <section className="mt-4">
-        <span className="px-1 text-[9px] font-bold uppercase tracking-[0.18em] text-dim">Lens</span>
-        <nav aria-label="Graph lens" className="mt-2 grid grid-cols-3 gap-1.5 md:grid-cols-1">
-          {(Object.keys(lensContent) as Lens[]).map((lens) => {
-            const item = lensContent[lens]
-            const active = activeLens === lens
-            const disabled = lens !== 'structure' && !lensEnabled
-            return (
-              <button
-                aria-current={active ? 'page' : undefined}
-                className={`flex min-w-0 items-center gap-3 rounded-xl border px-2.5 py-2.5 text-left transition-colors md:px-3 ${active ? 'border-primary/30 bg-primary/8 text-foreground' : 'border-transparent text-muted hover:border-border hover:bg-surface hover:text-foreground'} ${disabled ? 'cursor-not-allowed opacity-40 hover:border-transparent hover:bg-transparent' : ''}`}
-                disabled={disabled}
-                key={lens}
-                onClick={() => onLensChange(lens)}
-                title={
-                  disabled ? 'Select a function, method, or route to use this lens' : undefined
-                }
-                type="button"
-              >
-                <span
-                  className={`grid size-8 shrink-0 place-items-center rounded-lg ${active ? 'bg-primary/12 text-primary' : 'bg-panel text-dim'}`}
-                >
-                  <Icon className="size-4" name={item.icon} />
-                </span>
-                <span className="hidden min-w-0 md:block">
-                  <strong className="block text-xs font-semibold">{item.label}</strong>
-                  <small className="mt-0.5 block truncate text-[9px] text-dim">{item.copy}</small>
-                </span>
-              </button>
-            )
-          })}
-        </nav>
-        {!lensEnabled ? (
-          <p className="mt-2 hidden px-1 text-[9px] leading-4 text-dim md:block">
-            Select a function, method, or route to trace its flow or impact on the map.
+        <span className="px-1 text-[9px] font-bold uppercase tracking-[0.18em] text-dim">
+          Blast radius
+        </span>
+        {impactActive ? (
+          <>
+            <div
+              className="mt-2 grid grid-cols-3 gap-1 rounded-xl border border-border bg-panel p-1"
+              role="group"
+              aria-label="Blast radius side"
+            >
+              {impactFilters.map((filter) => {
+                const active = impactFilter === filter.value
+                return (
+                  <button
+                    aria-pressed={active}
+                    className={`rounded-lg px-2 py-1.5 text-[10px] font-semibold transition-colors ${active ? 'bg-primary/15 text-primary' : 'text-muted hover:text-foreground'}`}
+                    key={filter.value}
+                    onClick={() => onImpactFilterChange(filter.value)}
+                    type="button"
+                  >
+                    {filter.label}
+                  </button>
+                )
+              })}
+            </div>
+            <ImpactLegend className="mt-3 px-1" />
+          </>
+        ) : (
+          <p className="mt-2 px-1 text-[10px] leading-4 text-muted">
+            Click any node — a file, module, or function — to light up what it changes and what it
+            depends on.
           </p>
-        ) : null}
+        )}
       </section>
 
       <section className="mt-5 hidden md:block">

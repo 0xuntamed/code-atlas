@@ -210,6 +210,131 @@ func TestDeleteProjectCascades(t *testing.T) {
 	}
 }
 
+// seedImpactGraph builds a two-module codebase with cross-file edges so impact
+// traversal has real dependents/dependencies to find:
+//
+//	app/handler.go:  rtUsers --route--> handleUsers --calls--> listUsers
+//	services/user.go: listUsers --calls--> validate
+//	app/handler.go   --imports--> services/user.go
+func seedImpactGraph(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	project := model.Project{ID: "p1", Name: "demo", SourceType: model.SourceLocal, RootPath: t.TempDir()}
+	run := model.AnalysisRun{ID: "run1", ProjectID: "p1"}
+	if err := s.CreateProject(ctx, project, run); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	files := []model.FileRecord{
+		{ID: "fh", ProjectID: "p1", RunID: "run1", Path: "app/handler.go", Language: "go", Classification: "source"},
+		{ID: "fs", ProjectID: "p1", RunID: "run1", Path: "services/user.go", Language: "go", Classification: "source"},
+	}
+	entity := func(id, kind, name, fileID string) model.Entity {
+		return model.Entity{ID: id, ProjectID: "p1", RunID: "run1", FileID: fileID, Kind: kind, Name: name, QualifiedName: name, Language: "go"}
+	}
+	entities := []model.Entity{
+		entity("mApp", "module", "app", ""),
+		entity("mSvc", "module", "services", ""),
+		entity("feHandler", "file", "handler.go", "fh"),
+		entity("feSvc", "file", "user.go", "fs"),
+		entity("handleUsers", "function", "handleUsers", "fh"),
+		entity("rtUsers", "route", "GET /users", "fh"),
+		entity("listUsers", "function", "listUsers", "fs"),
+		entity("validate", "function", "validate", "fs"),
+	}
+	rel := func(id, kind, src, dst string) model.Relationship {
+		return model.Relationship{ID: id, ProjectID: "p1", RunID: "run1", SourceID: src, TargetID: dst, Kind: kind, Confidence: 1, Resolution: "resolved"}
+	}
+	relationships := []model.Relationship{
+		rel("c1", "contains", "mApp", "feHandler"),
+		rel("c2", "contains", "mSvc", "feSvc"),
+		rel("d1", "defines", "feHandler", "handleUsers"),
+		rel("d2", "defines", "feHandler", "rtUsers"),
+		rel("d3", "defines", "feSvc", "listUsers"),
+		rel("d4", "defines", "feSvc", "validate"),
+		rel("h1", "handles_route", "rtUsers", "handleUsers"),
+		rel("k1", "calls", "handleUsers", "listUsers"),
+		rel("k2", "calls", "listUsers", "validate"),
+		rel("i1", "imports", "feHandler", "feSvc"),
+	}
+	if err := s.ReplaceRunData(ctx, "run1", files, entities, relationships); err != nil {
+		t.Fatalf("replace run data: %v", err)
+	}
+	if err := s.PromoteRun(ctx, "run1", "p1"); err != nil {
+		t.Fatalf("promote run: %v", err)
+	}
+}
+
+func TestImpactMapFromSymbol(t *testing.T) {
+	s := newTestStore(t)
+	seedImpactGraph(t, s)
+
+	graph, err := s.ImpactMap(context.Background(), "p1", "listUsers", 6, 200)
+	if err != nil {
+		t.Fatalf("impact map: %v", err)
+	}
+	if got := directionOf(graph, "listUsers"); got != "root" {
+		t.Errorf("listUsers direction = %q, want root", got)
+	}
+	// Callers upstream break when listUsers changes.
+	if got := directionOf(graph, "handleUsers"); got != "dependent" {
+		t.Errorf("handleUsers direction = %q, want dependent", got)
+	}
+	if got := directionOf(graph, "rtUsers"); got != "dependent" {
+		t.Errorf("rtUsers direction = %q, want dependent", got)
+	}
+	// What listUsers relies on downstream.
+	if got := directionOf(graph, "validate"); got != "dependency" {
+		t.Errorf("validate direction = %q, want dependency", got)
+	}
+}
+
+func TestImpactMapFromFile(t *testing.T) {
+	s := newTestStore(t)
+	seedImpactGraph(t, s)
+
+	// Changing services/user.go should flag the app side that imports/calls it.
+	graph, err := s.ImpactMap(context.Background(), "p1", "feSvc", 6, 200)
+	if err != nil {
+		t.Fatalf("impact map: %v", err)
+	}
+	if got := directionOf(graph, "listUsers"); got != "root" {
+		t.Errorf("listUsers (a defined symbol of the file) direction = %q, want root", got)
+	}
+	if got := directionOf(graph, "handleUsers"); got != "dependent" {
+		t.Errorf("handleUsers direction = %q, want dependent", got)
+	}
+	if got := directionOf(graph, "feHandler"); got != "dependent" {
+		t.Errorf("feHandler (imports the file) direction = %q, want dependent", got)
+	}
+}
+
+func TestImpactMapFromModule(t *testing.T) {
+	s := newTestStore(t)
+	seedImpactGraph(t, s)
+
+	graph, err := s.ImpactMap(context.Background(), "p1", "mSvc", 6, 200)
+	if err != nil {
+		t.Fatalf("impact map: %v", err)
+	}
+	// The services module's dependents include the app file/symbols that use it.
+	if !hasNode(graph, "handleUsers") || directionOf(graph, "handleUsers") != "dependent" {
+		t.Errorf("expected handleUsers as a dependent of module services, got %q", directionOf(graph, "handleUsers"))
+	}
+	if !hasNode(graph, "feHandler") || directionOf(graph, "feHandler") != "dependent" {
+		t.Errorf("expected feHandler as a dependent of module services, got %q", directionOf(graph, "feHandler"))
+	}
+}
+
+func directionOf(g model.Graph, id string) string {
+	for _, n := range g.Nodes {
+		if n.ID == id {
+			return n.Direction
+		}
+	}
+	return ""
+}
+
 func hasNode(g model.Graph, id string) bool {
 	for _, n := range g.Nodes {
 		if n.ID == id {

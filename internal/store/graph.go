@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/codeatlas/codeatlas/internal/model"
 )
@@ -223,16 +224,171 @@ func (s *Store) ImpactGraph(ctx context.Context, projectID, rootID, direction st
 		[]string{"calls", "handles_route", "uses_middleware", "imports", "depends_on"})
 }
 
-func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction string, depth, limit int, kinds []string) (model.Graph, error) {
+// impactEdgeKinds are the relationship kinds a change propagates along.
+var impactEdgeKinds = []string{"calls", "handles_route", "uses_middleware", "imports", "depends_on"}
+
+func clampDepth(depth int) int {
 	if depth <= 0 {
-		depth = 5
+		return 5
 	}
 	if depth > 12 {
-		depth = 12
+		return 12
 	}
+	return depth
+}
+
+func clampNodes(limit int) int {
 	if limit <= 0 || limit > 500 {
-		limit = 500
+		return 500
 	}
+	return limit
+}
+
+func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction string, depth, limit int, kinds []string) (model.Graph, error) {
+	depth, limit = clampDepth(depth), clampNodes(limit)
+	nodes, truncated, err := s.traversalNodes(ctx, projectID, []string{rootID}, direction, depth, limit, kinds)
+	if err != nil {
+		return model.Graph{}, err
+	}
+	if len(nodes) == 0 {
+		return model.Graph{}, ErrNotFound
+	}
+	edges, err := s.edgesForNodes(ctx, projectID, nodes, kinds)
+	return model.Graph{Nodes: nodes, Edges: edges, RootID: rootID, Truncated: truncated, Limit: limit, MaxDepth: depth}, err
+}
+
+// ImpactMap returns the blast radius of a change to rootID: everything upstream
+// that depends on it (dependents) and everything downstream it relies on
+// (dependencies), merged into one graph with each node tagged by Direction. A
+// file or module root expands to the symbols it contains so its whole footprint
+// is traced, not just the container node.
+func (s *Store) ImpactMap(ctx context.Context, projectID, rootID string, depth, limit int) (model.Graph, error) {
+	root, err := s.Entity(ctx, projectID, rootID)
+	if err != nil {
+		return model.Graph{}, err
+	}
+	depth, limit = clampDepth(depth), clampNodes(limit)
+
+	seeds, err := s.impactSeeds(ctx, projectID, root)
+	if err != nil {
+		return model.Graph{}, err
+	}
+	seedSet := make(map[string]bool, len(seeds))
+	for _, id := range seeds {
+		seedSet[id] = true
+	}
+
+	dependents, _, err := s.traversalNodes(ctx, projectID, seeds, "upstream", depth, limit, impactEdgeKinds)
+	if err != nil {
+		return model.Graph{}, err
+	}
+	dependencies, _, err := s.traversalNodes(ctx, projectID, seeds, "downstream", depth, limit, impactEdgeKinds)
+	if err != nil {
+		return model.Graph{}, err
+	}
+
+	byID := make(map[string]*model.Entity)
+	order := make([]string, 0, len(dependents)+len(dependencies))
+	add := func(entity model.Entity, direction string) {
+		if existing, ok := byID[entity.ID]; ok {
+			if existing.Direction != "root" && direction != "root" && existing.Direction != direction {
+				existing.Direction = "both"
+			}
+			if entity.Distance < existing.Distance {
+				existing.Distance = entity.Distance
+			}
+			return
+		}
+		node := entity
+		node.Direction = direction
+		if seedSet[node.ID] {
+			node.Direction = "root"
+		}
+		byID[node.ID] = &node
+		order = append(order, node.ID)
+	}
+	for _, entity := range dependents {
+		add(entity, "dependent")
+	}
+	for _, entity := range dependencies {
+		add(entity, "dependency")
+	}
+
+	nodes := make([]model.Entity, 0, len(order))
+	truncated := false
+	for _, id := range order {
+		if len(nodes) >= limit {
+			truncated = true
+			break
+		}
+		nodes = append(nodes, *byID[id])
+	}
+	if len(nodes) == 0 {
+		return model.Graph{}, ErrNotFound
+	}
+	edges, err := s.edgesForNodes(ctx, projectID, nodes, impactEdgeKinds)
+	return model.Graph{Nodes: nodes, Edges: edges, RootID: rootID, Truncated: truncated, Limit: limit, MaxDepth: depth}, err
+}
+
+// impactSeeds expands a root entity into the set of symbols whose change is
+// equivalent to changing the root: a symbol is itself; a file is itself plus the
+// symbols it defines; a module is itself plus its files and their symbols.
+func (s *Store) impactSeeds(ctx context.Context, projectID string, root *model.Entity) ([]string, error) {
+	switch root.Kind {
+	case "file":
+		symbols, err := s.definedSymbols(ctx, projectID, []string{root.ID})
+		if err != nil {
+			return nil, err
+		}
+		return append([]string{root.ID}, symbols...), nil
+	case "module", "package":
+		files, err := s.containedFiles(ctx, projectID, root.ID)
+		if err != nil {
+			return nil, err
+		}
+		symbols, err := s.definedSymbols(ctx, projectID, files)
+		if err != nil {
+			return nil, err
+		}
+		return append(append([]string{root.ID}, files...), symbols...), nil
+	default:
+		return []string{root.ID}, nil
+	}
+}
+
+func (s *Store) containedFiles(ctx context.Context, projectID, moduleID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.target_entity_id FROM relationships r JOIN projects p ON p.active_run_id=r.run_id
+		WHERE r.project_id=? AND r.source_entity_id=? AND r.relationship_type='contains'`, projectID, moduleID)
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows)
+}
+
+func (s *Store) definedSymbols(ctx context.Context, projectID string, fileIDs []string) ([]string, error) {
+	if len(fileIDs) == 0 {
+		return nil, nil
+	}
+	query := fmt.Sprintf(`
+		SELECT r.target_entity_id FROM relationships r JOIN projects p ON p.active_run_id=r.run_id
+		WHERE r.project_id=? AND r.relationship_type='defines' AND r.source_entity_id IN (%s)`,
+		placeholders(len(fileIDs)))
+	args := append([]any{projectID}, stringArgs(fileIDs)...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows)
+}
+
+// traversalNodes walks the relationship graph from one or more seed entities and
+// returns the reached nodes (each carrying its Distance from the nearest seed).
+func (s *Store) traversalNodes(ctx context.Context, projectID string, seeds []string, direction string, depth, limit int, kinds []string) ([]model.Entity, bool, error) {
+	if len(seeds) == 0 {
+		return nil, false, nil
+	}
+	depth, limit = clampDepth(depth), clampNodes(limit)
 
 	// The next node reached along an edge, and the predicate that selects
 	// candidate edges, depend on the traversal direction. Entity IDs are hex,
@@ -250,9 +406,10 @@ func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction
 		joinPredicate = "(r.source_entity_id = w.node_id OR r.target_entity_id = w.node_id)"
 	}
 
+	seedValues := strings.TrimSuffix(strings.Repeat("(?),", len(seeds)), ",")
 	query := fmt.Sprintf(`
 		WITH RECURSIVE walk(node_id, depth, path) AS (
-			SELECT ?, 0, '/' || ? || '/'
+			SELECT column1, 0, '/' || column1 || '/' FROM (VALUES %[5]s)
 			UNION ALL
 			SELECT %[1]s, w.depth + 1, w.path || %[1]s || '/'
 			FROM walk w
@@ -273,15 +430,17 @@ func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction
 		JOIN projects p ON p.active_run_id = e.run_id
 		WHERE e.project_id = ?
 		ORDER BY selected.distance, e.qualified_name`,
-		nextExpr, placeholders(len(kinds)), joinPredicate, entityColumns)
+		nextExpr, placeholders(len(kinds)), joinPredicate, entityColumns, seedValues)
 
-	args := []any{rootID, rootID, projectID}
+	args := make([]any, 0, len(seeds)+len(kinds)+3)
+	args = append(args, stringArgs(seeds)...)
+	args = append(args, projectID)
 	args = append(args, stringArgs(kinds)...)
 	args = append(args, depth, limit+1, projectID)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return model.Graph{}, fmt.Errorf("traverse graph: %w", err)
+		return nil, false, fmt.Errorf("traverse graph: %w", err)
 	}
 	defer rows.Close()
 	nodes := make([]model.Entity, 0, limit)
@@ -290,10 +449,9 @@ func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction
 		var e model.Entity
 		var metadata []byte
 		var isTest int
-		err := rows.Scan(&e.ID, &e.ProjectID, &e.RunID, &e.FileID, &e.Kind, &e.Name, &e.QualifiedName, &e.Language,
-			&e.Range.StartLine, &e.Range.StartColumn, &e.Range.EndLine, &e.Range.EndColumn, &isTest, &metadata, &e.Distance)
-		if err != nil {
-			return model.Graph{}, err
+		if err := rows.Scan(&e.ID, &e.ProjectID, &e.RunID, &e.FileID, &e.Kind, &e.Name, &e.QualifiedName, &e.Language,
+			&e.Range.StartLine, &e.Range.StartColumn, &e.Range.EndLine, &e.Range.EndColumn, &isTest, &metadata, &e.Distance); err != nil {
+			return nil, false, err
 		}
 		e.IsTest = isTest != 0
 		_ = json.Unmarshal(metadata, &e.Metadata)
@@ -303,14 +461,7 @@ func (s *Store) traversalGraph(ctx context.Context, projectID, rootID, direction
 			truncated = true
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return model.Graph{}, err
-	}
-	if len(nodes) == 0 {
-		return model.Graph{}, ErrNotFound
-	}
-	edges, err := s.edgesForNodes(ctx, projectID, nodes, kinds)
-	return model.Graph{Nodes: nodes, Edges: edges, RootID: rootID, Truncated: truncated, Limit: limit, MaxDepth: depth}, err
+	return nodes, truncated, rows.Err()
 }
 
 func (s *Store) edgesForNodes(ctx context.Context, projectID string, nodes []model.Entity, kinds []string) ([]model.Relationship, error) {

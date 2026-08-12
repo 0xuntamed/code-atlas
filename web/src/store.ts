@@ -1,10 +1,11 @@
 import { create } from 'zustand'
-import type { ArchitectureCrumb, Lens } from './types'
+import type { ArchitectureCrumb, ImpactFilter } from './types'
 
 interface AtlasState {
   projectId: string
   selectedEntityId: string
-  lens: Lens
+  // Selecting any node reveals its blast radius; this chooses which side to show.
+  impactFilter: ImpactFilter
   // Drill-down trail for the structural map (overview → module → file). Lives in
   // the store so it survives remounts and stays consistent with the selection.
   scopePath: ArchitectureCrumb[]
@@ -12,7 +13,7 @@ interface AtlasState {
   showReferences: boolean
   setProject: (id: string) => void
   selectEntity: (id: string) => void
-  setLens: (lens: Lens) => void
+  setImpactFilter: (filter: ImpactFilter) => void
   openScope: (crumb: ArchitectureCrumb) => void
   navigateScope: (index: number) => void
   toggleTests: () => void
@@ -23,14 +24,14 @@ interface AtlasState {
 export const useAtlasStore = create<AtlasState>((set) => ({
   projectId: '',
   selectedEntityId: '',
-  lens: 'structure',
+  impactFilter: 'both',
   scopePath: [],
   showTests: false,
   showReferences: false,
   setProject: (projectId) =>
-    set({ projectId, selectedEntityId: '', lens: 'structure', scopePath: [] }),
+    set({ projectId, selectedEntityId: '', impactFilter: 'both', scopePath: [] }),
   selectEntity: (selectedEntityId) => set({ selectedEntityId }),
-  setLens: (lens) => set({ lens }),
+  setImpactFilter: (impactFilter) => set({ impactFilter }),
   openScope: (crumb) =>
     set((state) => {
       const existing = state.scopePath.findIndex((entry) => entry.id === crumb.id)

@@ -1,6 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api'
-import { isTraceable } from '../../lib/entityKinds'
 import { useAtlasStore } from '../../store'
 import type { Entity, Project } from '../../types'
 import { AnalysisFailure, AnalysisProgress } from '../analysis/AnalysisProgress'
@@ -35,12 +34,12 @@ export function Workspace({ project }: { project: Project }) {
 
 function ReadyWorkspace({ project }: { project: Project }) {
   const selectedEntityId = useAtlasStore((state) => state.selectedEntityId)
-  const lens = useAtlasStore((state) => state.lens)
+  const impactFilter = useAtlasStore((state) => state.impactFilter)
   const scopePath = useAtlasStore((state) => state.scopePath)
   const showTests = useAtlasStore((state) => state.showTests)
   const showReferences = useAtlasStore((state) => state.showReferences)
   const selectEntity = useAtlasStore((state) => state.selectEntity)
-  const setLens = useAtlasStore((state) => state.setLens)
+  const setImpactFilter = useAtlasStore((state) => state.setImpactFilter)
   const openScope = useAtlasStore((state) => state.openScope)
   const navigateScope = useAtlasStore((state) => state.navigateScope)
   const toggleTests = useAtlasStore((state) => state.toggleTests)
@@ -48,7 +47,6 @@ function ReadyWorkspace({ project }: { project: Project }) {
   const resetSelection = useAtlasStore((state) => state.resetSelection)
 
   const graph = useWorkspaceGraph(project)
-  const lensEnabled = isTraceable(graph.selectedEntity?.kind)
 
   // Drilling in only applies to containers; the canvas guards double-click too.
   const explore = (entity: Entity) => {
@@ -64,11 +62,11 @@ function ReadyWorkspace({ project }: { project: Project }) {
   return (
     <div className="relative grid h-[calc(100dvh-4rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden md:grid-cols-[17rem_minmax(0,1fr)] md:grid-rows-1 xl:grid-cols-[17rem_minmax(0,1fr)_22.5rem]">
       <WorkspaceSidebar
-        activeLens={lens}
         graph={graph.displayGraph}
         hiddenTotal={graph.hiddenTotal}
-        lensEnabled={lensEnabled}
-        onLensChange={setLens}
+        impactActive={graph.impactActive}
+        impactFilter={impactFilter}
+        onImpactFilterChange={setImpactFilter}
         onSelect={selectEntity}
         onToggleReferences={toggleReferences}
         onToggleTests={toggleTests}
@@ -81,22 +79,21 @@ function ReadyWorkspace({ project }: { project: Project }) {
         <GraphToolbar
           graph={graph.displayGraph}
           hiddenTotal={graph.hiddenTotal}
-          lens={lens}
-          lensActive={graph.lensActive}
+          impactActive={graph.impactActive}
           onNavigate={navigateScope}
           scopePath={scopePath}
+          selectedName={graph.selectedEntity?.name}
         />
         <section className="relative min-h-0">
           {graph.isError ? (
             <GraphError />
           ) : (
             <GraphCanvas
+              directionById={graph.directionById}
               graph={graph.displayGraph}
-              highlightEdgeIds={graph.highlightEdgeIds}
-              highlightNodeIds={graph.highlightNodeIds}
               hiddenCount={graph.hiddenTotal}
-              layoutMode={graph.lensActive ? lens : 'structure'}
-              lensActive={graph.lensActive}
+              impactActive={graph.impactActive}
+              impactEdgeIds={graph.impactEdgeIds}
               onExplore={exploreById}
               onSelect={selectEntity}
               selectedEntityId={selectedEntityId}
@@ -110,7 +107,6 @@ function ReadyWorkspace({ project }: { project: Project }) {
         key={graph.selectedEntity?.id ?? 'empty'}
         onClose={resetSelection}
         onExplore={explore}
-        onSetLens={setLens}
         projectId={project.id}
       />
     </div>

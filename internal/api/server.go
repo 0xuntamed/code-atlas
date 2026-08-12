@@ -47,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/graph/architecture", s.architecture)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/flow/{entityID}", s.flow)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/impact/{entityID}", s.impact)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/impact-map/{entityID}", s.impactMap)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/entities/{entityID}", s.entity)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/entities/{entityID}/source", s.source)
 

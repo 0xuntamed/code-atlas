@@ -3,39 +3,43 @@ import { Background, Controls, MarkerType, MiniMap, Position, ReactFlow } from '
 import '@xyflow/react/dist/style.css'
 import { graphLayoutKey } from '../../lib/graph'
 import { DENSITY } from '../../lib/graphConfig'
-import type { GraphResponse, Lens } from '../../types'
+import type { GraphResponse, ImpactDirection } from '../../types'
 import { AtlasNode, type AtlasFlowNode } from './AtlasNode'
 import { RelationshipEdge, type RelationshipFlowEdge } from './RelationshipEdge'
 
 const nodeTypes = { atlas: AtlasNode }
 const edgeTypes = { relationship: RelationshipEdge }
 
+// Edge stroke per blast-radius side (SVG needs real colors, not Tailwind classes).
+const directionStroke: Record<ImpactDirection, string> = {
+  root: 'var(--ui-graph-edge)',
+  dependent: '#fb7185',
+  dependency: '#38bdf8',
+  both: '#a78bfa',
+}
+
 export function GraphCanvas({
   graph,
   hiddenCount,
   selectedEntityId,
-  layoutMode,
-  lensActive,
-  highlightNodeIds,
-  highlightEdgeIds,
+  directionById,
+  impactEdgeIds,
+  impactActive,
   onSelect,
   onExplore,
 }: {
   graph?: GraphResponse
   hiddenCount: number
   selectedEntityId: string
-  layoutMode: Lens
-  lensActive: boolean
-  highlightNodeIds: Set<string>
-  highlightEdgeIds: Set<string>
+  directionById: Map<string, ImpactDirection>
+  impactEdgeIds: Set<string>
+  impactActive: boolean
   onSelect: (id: string) => void
   onExplore: (id: string) => void
 }) {
+  const mode = impactActive ? 'impact' : 'structure'
   const deferredGraph = useDeferredValue(graph)
-  const layoutKey = useMemo(
-    () => graphLayoutKey(deferredGraph, layoutMode),
-    [deferredGraph, layoutMode],
-  )
+  const layoutKey = useMemo(() => graphLayoutKey(deferredGraph, mode), [deferredGraph, mode])
   const [layout, setLayout] = useState<{
     key: string
     positions: Record<string, { x: number; y: number }>
@@ -70,7 +74,7 @@ export function GraphCanvas({
       worker.terminate()
     }
     worker.postMessage({
-      mode: layoutMode,
+      mode,
       nodes: deferredGraph.nodes.map(({ id }) => ({ id })),
       edges: deferredGraph.edges.map(({ id, source, target }) => ({ id, source, target })),
     })
@@ -80,17 +84,17 @@ export function GraphCanvas({
       window.clearTimeout(timeout)
       worker.terminate()
     }
-  }, [deferredGraph, layoutKey, layoutMode])
+  }, [deferredGraph, layoutKey, mode])
 
   const nodeCount = deferredGraph?.nodes.length ?? 0
   const compact = nodeCount > DENSITY.compactAbove
   const showEdgeLabels = nodeCount <= DENSITY.edgeLabelsUpTo
-  const direction = layoutMode === 'structure' ? 'horizontal' : 'vertical'
+  const direction = impactActive ? 'vertical' : 'horizontal'
 
   const nodes = useMemo<AtlasFlowNode[]>(() => {
     if (!deferredGraph || !positions) return []
     return deferredGraph.nodes.map((entity) => {
-      const highlighted = highlightNodeIds.has(entity.id)
+      const impactDirection = directionById.get(entity.id)
       return {
         id: entity.id,
         type: 'atlas',
@@ -98,14 +102,14 @@ export function GraphCanvas({
           entity,
           compact,
           direction,
-          highlighted: lensActive && highlighted,
-          dimmed: lensActive && !highlighted && entity.id !== selectedEntityId,
+          impactDirection,
+          dimmed: impactActive && !impactDirection && entity.id !== selectedEntityId,
         },
         position: positions[entity.id] ?? { x: 0, y: 0 },
         selected: entity.id === selectedEntityId,
       }
     })
-  }, [compact, deferredGraph, direction, highlightNodeIds, lensActive, positions, selectedEntityId])
+  }, [compact, deferredGraph, direction, directionById, impactActive, positions, selectedEntityId])
 
   const edges = useMemo<RelationshipFlowEdge[]>(() => {
     if (!deferredGraph) return []
@@ -113,9 +117,13 @@ export function GraphCanvas({
       const aggregateCount = relationship.metadata?.relationshipCount
       const count = typeof aggregateCount === 'number' ? aggregateCount : 0
       const resolved = relationship.resolution === 'resolved'
-      const onLens = lensActive && highlightEdgeIds.has(relationship.id)
-      const faded = lensActive && !onLens
-      const stroke = resolved ? 'var(--ui-graph-edge)' : 'var(--ui-graph-edge-muted)'
+      const onImpact = impactActive && impactEdgeIds.has(relationship.id)
+      const faded = impactActive && !onImpact
+      const stroke = onImpact
+        ? edgeStroke(relationship.source, relationship.target, directionById)
+        : resolved
+          ? 'var(--ui-graph-edge)'
+          : 'var(--ui-graph-edge-muted)'
       return {
         id: relationship.id,
         type: 'relationship',
@@ -128,17 +136,25 @@ export function GraphCanvas({
             ? `${relationship.kind.replaceAll('_', ' ')}${count > 1 ? ` x${count}` : ''}`
             : undefined,
         },
-        animated: onLens && resolved && nodeCount < DENSITY.animateBelow,
+        animated: onImpact && resolved && nodeCount < DENSITY.animateBelow,
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
         style: {
           stroke,
-          strokeWidth: onLens ? 1.8 : resolved ? 1.4 : 1,
+          strokeWidth: onImpact ? 2 : resolved ? 1.4 : 1,
           strokeDasharray: resolved ? undefined : '6 5',
-          opacity: faded ? 0.25 : 1,
+          opacity: faded ? 0.2 : 1,
         },
       }
     })
-  }, [deferredGraph, direction, highlightEdgeIds, lensActive, nodeCount, showEdgeLabels])
+  }, [
+    deferredGraph,
+    direction,
+    directionById,
+    impactActive,
+    impactEdgeIds,
+    nodeCount,
+    showEdgeLabels,
+  ])
 
   if (!graph) return <GraphLoading label="Loading derived metadata..." />
   if (!graph.nodes.length) return <GraphEmpty hiddenCount={hiddenCount} />
@@ -146,7 +162,7 @@ export function GraphCanvas({
 
   return (
     <ReactFlow
-      aria-label={`${layoutMode} graph`}
+      aria-label={`${mode} graph`}
       edgeTypes={edgeTypes}
       edges={edges}
       elementsSelectable
@@ -178,6 +194,19 @@ export function GraphCanvas({
       ) : null}
     </ReactFlow>
   )
+}
+
+// An impact edge is stroked by its non-root endpoint's role, so the color matches
+// the node it points at (a dependent edge reads rose, a dependency edge sky).
+function edgeStroke(
+  source: string,
+  target: string,
+  directionById: Map<string, ImpactDirection>,
+): string {
+  const targetDir = directionById.get(target)
+  const sourceDir = directionById.get(source)
+  const pick = targetDir && targetDir !== 'root' ? targetDir : sourceDir
+  return pick ? directionStroke[pick] : 'var(--ui-graph-edge)'
 }
 
 function fallbackPositions(ids: string[]): Record<string, { x: number; y: number }> {

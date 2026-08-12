@@ -90,7 +90,10 @@ type Entity struct {
 	Range         Range          `json:"range"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 	Distance      int            `json:"distance,omitempty"`
-	IsTest        bool           `json:"isTest,omitempty"`
+	// Direction relative to an impact root: root, dependent (upstream, breaks if
+	// the root changes), dependency (downstream, relied upon), or both.
+	Direction string `json:"direction,omitempty"`
+	IsTest    bool   `json:"isTest,omitempty"`
 }
 
 type Relationship struct {
