@@ -1,18 +1,8 @@
 import type { Entity, GraphFilters, GraphResponse } from '../types'
+import { MEANINGFUL_KINDS, REFERENCE_KINDS } from './entityKinds'
 
-const meaningfulKinds = new Set([
-  'package',
-  'module',
-  'file',
-  'function',
-  'method',
-  'class',
-  'struct',
-  'interface',
-  'route',
-])
-
-const referenceKinds = new Set(['external_symbol', 'unresolved_symbol'])
+const meaningfulKinds = MEANINGFUL_KINDS
+const referenceKinds = REFERENCE_KINDS
 
 export interface FilteredGraph {
   graph?: GraphResponse

@@ -4,7 +4,7 @@ import { api, APIError } from '../../api'
 import { Button } from '../../components/Button'
 import { Icon } from '../../components/Icon'
 import { entityKindLabel } from '../../lib/graph'
-import type { Entity, GraphView, SourceEvidence } from '../../types'
+import type { Entity, Lens, SourceEvidence } from '../../types'
 
 const LocalSourceEditor = lazy(() => import('./LocalSourceEditor'))
 const preloadSourceEditor = () => void import('./LocalSourceEditor')
@@ -14,13 +14,13 @@ export function EntityInspector({
   entity,
   onClose,
   onExplore,
-  onViewChange,
+  onSetLens,
 }: {
   projectId: string
   entity?: Entity
   onClose: () => void
   onExplore: (entity: Entity) => void
-  onViewChange: (view: GraphView) => void
+  onSetLens: (lens: Lens) => void
 }) {
   const [sourceOpen, setSourceOpen] = useState(false)
   const source = useQuery({
@@ -91,11 +91,11 @@ export function EntityInspector({
               </Button>
             ) : (
               <>
-                <Button intent="secondary" onClick={() => onViewChange('flow')} size="sm">
+                <Button intent="secondary" onClick={() => onSetLens('flow')} size="sm">
                   <Icon className="size-3.5" name="flow" />
                   Trace flow
                 </Button>
-                <Button intent="secondary" onClick={() => onViewChange('impact')} size="sm">
+                <Button intent="secondary" onClick={() => onSetLens('impact')} size="sm">
                   <Icon className="size-3.5" name="impact" />
                   Check impact
                 </Button>

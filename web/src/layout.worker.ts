@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import ELK from 'elkjs/lib/elk.bundled.js'
+import { NODE_HEIGHT, NODE_WIDTH } from './lib/graphConfig'
 
 const elk = new ELK()
 
@@ -15,13 +16,14 @@ self.onmessage = async (
     id: 'root',
     layoutOptions: {
       'elk.algorithm': 'layered',
-      'elk.direction': mode === 'architecture' ? 'RIGHT' : 'DOWN',
+      // Structure map reads left-to-right; the flow/impact lenses read top-down.
+      'elk.direction': mode === 'structure' ? 'RIGHT' : 'DOWN',
       'elk.spacing.nodeNode': '44',
       'elk.layered.spacing.nodeNodeBetweenLayers': '92',
       'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
       'elk.layered.cycleBreaking.strategy': 'GREEDY',
     },
-    children: nodes.map((node) => ({ id: node.id, width: 214, height: 82 })),
+    children: nodes.map((node) => ({ id: node.id, width: NODE_WIDTH, height: NODE_HEIGHT })),
     edges: edges.map((edge) => ({ id: edge.id, sources: [edge.source], targets: [edge.target] })),
   })
   self.postMessage(

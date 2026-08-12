@@ -1,54 +1,61 @@
 import { Icon, type IconName } from '../../components/Icon'
-import type { FilteredGraph } from '../../lib/graph'
-import type { GraphView } from '../../types'
+import type { GraphResponse, Lens } from '../../types'
 import { SkippedFiles } from '../files/SkippedFiles'
 import { SymbolSearch } from '../search/SymbolSearch'
 
-const viewContent: Record<GraphView, { icon: IconName; label: string; copy: string }> = {
-  architecture: { icon: 'architecture', label: 'Architecture', copy: 'Modules and symbols' },
+const lensContent: Record<Lens, { icon: IconName; label: string; copy: string }> = {
+  structure: { icon: 'architecture', label: 'Structure', copy: 'Modules and symbols' },
   flow: { icon: 'flow', label: 'Flow', copy: 'Downstream execution' },
   impact: { icon: 'impact', label: 'Impact', copy: 'Change blast radius' },
 }
 
 export function WorkspaceSidebar({
   projectId,
-  activeView,
-  filtered,
+  activeLens,
+  lensEnabled,
+  graph,
+  hiddenTotal,
   showTests,
   showReferences,
   onSelect,
   onToggleTests,
   onToggleReferences,
-  onViewChange,
+  onLensChange,
 }: {
   projectId: string
-  activeView: GraphView
-  filtered: FilteredGraph
+  activeLens: Lens
+  // Whether the overlay lenses can be applied (a traceable symbol is selected).
+  lensEnabled: boolean
+  graph?: GraphResponse
+  hiddenTotal: number
   showTests: boolean
   showReferences: boolean
   onSelect: (id: string) => void
   onToggleTests: () => void
   onToggleReferences: () => void
-  onViewChange: (view: GraphView) => void
+  onLensChange: (lens: Lens) => void
 }) {
   return (
     <aside className="min-h-0 overflow-y-auto border-b border-border bg-canvas-raised/72 p-3 md:border-b-0 md:border-r md:p-4">
       <SymbolSearch projectId={projectId} showTests={showTests} onSelect={onSelect} />
 
       <section className="mt-4">
-        <span className="px-1 text-[9px] font-bold uppercase tracking-[0.18em] text-dim">
-          Graph mode
-        </span>
-        <nav aria-label="Graph modes" className="mt-2 grid grid-cols-3 gap-1.5 md:grid-cols-1">
-          {(Object.keys(viewContent) as GraphView[]).map((view) => {
-            const item = viewContent[view]
-            const active = activeView === view
+        <span className="px-1 text-[9px] font-bold uppercase tracking-[0.18em] text-dim">Lens</span>
+        <nav aria-label="Graph lens" className="mt-2 grid grid-cols-3 gap-1.5 md:grid-cols-1">
+          {(Object.keys(lensContent) as Lens[]).map((lens) => {
+            const item = lensContent[lens]
+            const active = activeLens === lens
+            const disabled = lens !== 'structure' && !lensEnabled
             return (
               <button
                 aria-current={active ? 'page' : undefined}
-                className={`flex min-w-0 items-center gap-3 rounded-xl border px-2.5 py-2.5 text-left transition-colors md:px-3 ${active ? 'border-primary/30 bg-primary/8 text-foreground' : 'border-transparent text-muted hover:border-border hover:bg-surface hover:text-foreground'}`}
-                key={view}
-                onClick={() => onViewChange(view)}
+                className={`flex min-w-0 items-center gap-3 rounded-xl border px-2.5 py-2.5 text-left transition-colors md:px-3 ${active ? 'border-primary/30 bg-primary/8 text-foreground' : 'border-transparent text-muted hover:border-border hover:bg-surface hover:text-foreground'} ${disabled ? 'cursor-not-allowed opacity-40 hover:border-transparent hover:bg-transparent' : ''}`}
+                disabled={disabled}
+                key={lens}
+                onClick={() => onLensChange(lens)}
+                title={
+                  disabled ? 'Select a function, method, or route to use this lens' : undefined
+                }
                 type="button"
               >
                 <span
@@ -64,6 +71,11 @@ export function WorkspaceSidebar({
             )
           })}
         </nav>
+        {!lensEnabled ? (
+          <p className="mt-2 hidden px-1 text-[9px] leading-4 text-dim md:block">
+            Select a function, method, or route to trace its flow or impact on the map.
+          </p>
+        ) : null}
       </section>
 
       <section className="mt-5 hidden md:block">
@@ -99,16 +111,14 @@ export function WorkspaceSidebar({
           <span className="size-1.5 rounded-full bg-primary" />
         </div>
         <strong className="mt-2 block font-mono text-sm font-semibold text-foreground">
-          {filtered.graph ? `${filtered.graph.nodes.length} nodes` : 'Loading'}
+          {graph ? `${graph.nodes.length} nodes` : 'Loading'}
         </strong>
         <p className="mt-1 text-[10px] leading-4 text-muted">
-          {filtered.graph
-            ? `${filtered.graph.edges.length} visible relationships`
-            : 'Reading graph metadata'}
+          {graph ? `${graph.edges.length} visible relationships` : 'Reading graph metadata'}
         </p>
-        {filtered.hiddenTotal > 0 ? (
+        {hiddenTotal > 0 ? (
           <p className="mt-2 border-t border-border pt-2 text-[9px] leading-4 text-dim">
-            {filtered.hiddenTotal} low-signal nodes hidden by default
+            {hiddenTotal} low-signal nodes hidden by default
           </p>
         ) : null}
       </section>

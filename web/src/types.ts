@@ -1,6 +1,8 @@
 export type SourceType = 'local' | 'git'
 export type ProjectStatus = 'queued' | 'analyzing' | 'ready' | 'failed'
-export type GraphView = 'architecture' | 'flow' | 'impact'
+// The base structural map plus the two overlay lenses that highlight a selected
+// symbol's downstream flow or change-impact radius on that same map.
+export type Lens = 'structure' | 'flow' | 'impact'
 
 export interface AnalysisRun {
   id: string

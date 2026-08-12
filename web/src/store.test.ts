@@ -6,32 +6,53 @@ describe('atlas workspace state', () => {
     useAtlasStore.setState({
       projectId: '',
       selectedEntityId: '',
-      graphView: 'architecture',
+      lens: 'structure',
+      scopePath: [],
       showTests: false,
       showReferences: false,
     }),
   )
 
   it('resets graph context when switching projects', () => {
-    useAtlasStore.getState().setProject('project-a')
-    useAtlasStore.getState().selectEntity('entity-a')
-    useAtlasStore.getState().setGraphView('impact')
-    useAtlasStore.getState().setProject('project-b')
+    const store = useAtlasStore.getState()
+    store.setProject('project-a')
+    store.selectEntity('entity-a')
+    store.setLens('impact')
+    store.openScope({ id: 'mod', name: 'mod', kind: 'module' })
+    store.setProject('project-b')
     expect(useAtlasStore.getState()).toMatchObject({
       projectId: 'project-b',
       selectedEntityId: '',
-      graphView: 'architecture',
+      lens: 'structure',
+      scopePath: [],
     })
   })
 
-  it('keeps explicit signal filters across graph modes', () => {
-    useAtlasStore.getState().toggleTests()
-    useAtlasStore.getState().toggleReferences()
-    useAtlasStore.getState().setGraphView('flow')
+  it('keeps explicit signal filters across lenses', () => {
+    const store = useAtlasStore.getState()
+    store.toggleTests()
+    store.toggleReferences()
+    store.setLens('flow')
     expect(useAtlasStore.getState()).toMatchObject({
-      graphView: 'flow',
+      lens: 'flow',
       showTests: true,
       showReferences: true,
     })
+  })
+
+  it('tracks and rewinds the drill-down scope path', () => {
+    const store = useAtlasStore.getState()
+    store.openScope({ id: 'a', name: 'a', kind: 'module' })
+    store.openScope({ id: 'b', name: 'b', kind: 'file' })
+    expect(useAtlasStore.getState().scopePath.map((crumb) => crumb.id)).toEqual(['a', 'b'])
+
+    // Re-opening an ancestor truncates the trail instead of duplicating it.
+    store.openScope({ id: 'a', name: 'a', kind: 'module' })
+    expect(useAtlasStore.getState().scopePath.map((crumb) => crumb.id)).toEqual(['a'])
+    expect(useAtlasStore.getState().selectedEntityId).toBe('a')
+
+    store.navigateScope(-1)
+    expect(useAtlasStore.getState().scopePath).toEqual([])
+    expect(useAtlasStore.getState().selectedEntityId).toBe('')
   })
 })

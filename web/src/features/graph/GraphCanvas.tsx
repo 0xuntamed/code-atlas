@@ -2,7 +2,8 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { Background, Controls, MarkerType, MiniMap, Position, ReactFlow } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { graphLayoutKey } from '../../lib/graph'
-import type { GraphResponse, GraphView } from '../../types'
+import { DENSITY } from '../../lib/graphConfig'
+import type { GraphResponse, Lens } from '../../types'
 import { AtlasNode, type AtlasFlowNode } from './AtlasNode'
 import { RelationshipEdge, type RelationshipFlowEdge } from './RelationshipEdge'
 
@@ -13,19 +14,28 @@ export function GraphCanvas({
   graph,
   hiddenCount,
   selectedEntityId,
-  mode,
+  layoutMode,
+  lensActive,
+  highlightNodeIds,
+  highlightEdgeIds,
   onSelect,
   onExplore,
 }: {
   graph?: GraphResponse
   hiddenCount: number
   selectedEntityId: string
-  mode: GraphView
+  layoutMode: Lens
+  lensActive: boolean
+  highlightNodeIds: Set<string>
+  highlightEdgeIds: Set<string>
   onSelect: (id: string) => void
   onExplore: (id: string) => void
 }) {
   const deferredGraph = useDeferredValue(graph)
-  const layoutKey = useMemo(() => graphLayoutKey(deferredGraph, mode), [deferredGraph, mode])
+  const layoutKey = useMemo(
+    () => graphLayoutKey(deferredGraph, layoutMode),
+    [deferredGraph, layoutMode],
+  )
   const [layout, setLayout] = useState<{
     key: string
     positions: Record<string, { x: number; y: number }>
@@ -60,7 +70,7 @@ export function GraphCanvas({
       worker.terminate()
     }
     worker.postMessage({
-      mode,
+      mode: layoutMode,
       nodes: deferredGraph.nodes.map(({ id }) => ({ id })),
       edges: deferredGraph.edges.map(({ id, source, target }) => ({ id, source, target })),
     })
@@ -70,22 +80,32 @@ export function GraphCanvas({
       window.clearTimeout(timeout)
       worker.terminate()
     }
-  }, [deferredGraph, layoutKey, mode])
+  }, [deferredGraph, layoutKey, layoutMode])
 
-  const compact = (deferredGraph?.nodes.length ?? 0) > 60
-  const showEdgeLabels = (deferredGraph?.nodes.length ?? 0) <= 30
-  const direction = mode === 'architecture' ? 'horizontal' : 'vertical'
+  const nodeCount = deferredGraph?.nodes.length ?? 0
+  const compact = nodeCount > DENSITY.compactAbove
+  const showEdgeLabels = nodeCount <= DENSITY.edgeLabelsUpTo
+  const direction = layoutMode === 'structure' ? 'horizontal' : 'vertical'
 
   const nodes = useMemo<AtlasFlowNode[]>(() => {
     if (!deferredGraph || !positions) return []
-    return deferredGraph.nodes.map((entity) => ({
-      id: entity.id,
-      type: 'atlas',
-      data: { entity, compact, direction },
-      position: positions[entity.id] ?? { x: 0, y: 0 },
-      selected: entity.id === selectedEntityId,
-    }))
-  }, [compact, deferredGraph, direction, positions, selectedEntityId])
+    return deferredGraph.nodes.map((entity) => {
+      const highlighted = highlightNodeIds.has(entity.id)
+      return {
+        id: entity.id,
+        type: 'atlas',
+        data: {
+          entity,
+          compact,
+          direction,
+          highlighted: lensActive && highlighted,
+          dimmed: lensActive && !highlighted && entity.id !== selectedEntityId,
+        },
+        position: positions[entity.id] ?? { x: 0, y: 0 },
+        selected: entity.id === selectedEntityId,
+      }
+    })
+  }, [compact, deferredGraph, direction, highlightNodeIds, lensActive, positions, selectedEntityId])
 
   const edges = useMemo<RelationshipFlowEdge[]>(() => {
     if (!deferredGraph) return []
@@ -93,6 +113,9 @@ export function GraphCanvas({
       const aggregateCount = relationship.metadata?.relationshipCount
       const count = typeof aggregateCount === 'number' ? aggregateCount : 0
       const resolved = relationship.resolution === 'resolved'
+      const onLens = lensActive && highlightEdgeIds.has(relationship.id)
+      const faded = lensActive && !onLens
+      const stroke = resolved ? 'var(--ui-graph-edge)' : 'var(--ui-graph-edge-muted)'
       return {
         id: relationship.id,
         type: 'relationship',
@@ -105,19 +128,17 @@ export function GraphCanvas({
             ? `${relationship.kind.replaceAll('_', ' ')}${count > 1 ? ` x${count}` : ''}`
             : undefined,
         },
-        animated: mode === 'flow' && resolved && deferredGraph.nodes.length < 45,
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: resolved ? 'var(--ui-graph-edge)' : 'var(--ui-graph-edge-muted)',
-        },
+        animated: onLens && resolved && nodeCount < DENSITY.animateBelow,
+        markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
         style: {
-          stroke: resolved ? 'var(--ui-graph-edge)' : 'var(--ui-graph-edge-muted)',
-          strokeWidth: resolved ? 1.4 : 1,
+          stroke,
+          strokeWidth: onLens ? 1.8 : resolved ? 1.4 : 1,
           strokeDasharray: resolved ? undefined : '6 5',
+          opacity: faded ? 0.25 : 1,
         },
       }
     })
-  }, [deferredGraph, direction, mode, showEdgeLabels])
+  }, [deferredGraph, direction, highlightEdgeIds, lensActive, nodeCount, showEdgeLabels])
 
   if (!graph) return <GraphLoading label="Loading derived metadata..." />
   if (!graph.nodes.length) return <GraphEmpty hiddenCount={hiddenCount} />
@@ -125,7 +146,7 @@ export function GraphCanvas({
 
   return (
     <ReactFlow
-      aria-label={`${mode} graph`}
+      aria-label={`${layoutMode} graph`}
       edgeTypes={edgeTypes}
       edges={edges}
       elementsSelectable
@@ -147,7 +168,7 @@ export function GraphCanvas({
     >
       <Background color="var(--ui-graph-grid)" gap={28} size={1} />
       <Controls showInteractive={false} />
-      {nodes.length <= 70 ? (
+      {nodes.length <= DENSITY.minimapUpTo ? (
         <MiniMap
           maskColor="var(--ui-graph-mask)"
           nodeColor="var(--ui-graph-node)"
