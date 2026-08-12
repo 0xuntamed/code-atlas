@@ -81,6 +81,20 @@ func (s *Server) impact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, graph)
 }
 
+func (s *Server) impactMap(w http.ResponseWriter, r *http.Request) {
+	graph, err := s.store.ImpactMap(
+		r.Context(),
+		r.PathValue("projectID"),
+		r.PathValue("entityID"),
+		parseDepth(r, 4),
+		parseLimit(r, 160, 500),
+	)
+	if handleStoreError(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, graph)
+}
+
 func (s *Server) entity(w http.ResponseWriter, r *http.Request) {
 	entity, err := s.store.Entity(
 		r.Context(),

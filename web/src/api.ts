@@ -82,6 +82,12 @@ export const api = {
       undefined,
       signal,
     ),
+  impactMap: (projectId: string, entityId: string, signal?: AbortSignal) =>
+    request<GraphResponse>(
+      `/projects/${encodeURIComponent(projectId)}/impact-map/${encodeURIComponent(entityId)}?depth=4&limit=160`,
+      undefined,
+      signal,
+    ),
   search: (projectId: string, query: string, signal?: AbortSignal) =>
     request<{ entities: Entity[] }>(
       `/projects/${encodeURIComponent(projectId)}/search?q=${encodeURIComponent(query)}`,

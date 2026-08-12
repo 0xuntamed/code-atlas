@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,23 +22,35 @@ import (
 	"github.com/codeatlas/codeatlas/internal/store"
 )
 
+const (
+	defaultListenAddress = "127.0.0.1:7331"
+	defaultServerURL     = "http://127.0.0.1:7331"
+	databaseFileName     = "codeatlas.db"
+
+	readHeaderTimeout = 5 * time.Second
+	idleTimeout       = 60 * time.Second
+	shutdownTimeout   = 5 * time.Second
+	requestTimeout    = 30 * time.Second
+)
+
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "codeatlas:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	command := "serve"
-	if len(os.Args) > 1 {
-		command = os.Args[1]
+func run(args []string) error {
+	if len(args) == 0 {
+		return serve(nil)
 	}
+
+	command, commandArgs := args[0], args[1:]
 	switch command {
 	case "serve":
-		return serve(os.Args[2:])
+		return serve(commandArgs)
 	case "add":
-		return add(os.Args[2:])
+		return add(commandArgs)
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -49,8 +62,8 @@ func run() error {
 
 func serve(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	listen := flags.String("listen", env("CODEATLAS_LISTEN_ADDR", "127.0.0.1:7331"), "loopback listen address")
-	databaseURL := flags.String("database-url", env("CODEATLAS_DATABASE_URL", "postgres://codeatlas:codeatlas@127.0.0.1:5433/codeatlas?sslmode=disable"), "PostgreSQL connection URL")
+	listen := flags.String("listen", env("CODEATLAS_LISTEN_ADDR", defaultListenAddress), "loopback listen address")
+	databasePath := flags.String("database", env("CODEATLAS_DATABASE_PATH", ""), "SQLite database file path (defaults to <data-dir>/"+databaseFileName+")")
 	dataDir := flags.String("data-dir", env("CODEATLAS_DATA_DIR", defaultDataDir()), "local application data directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -58,10 +71,13 @@ func serve(args []string) error {
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+	if *databasePath == "" {
+		*databasePath = filepath.Join(*dataDir, databaseFileName)
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	database, err := store.Open(ctx, *databaseURL)
+	database, err := store.Open(ctx, *databasePath)
 	if err != nil {
 		return err
 	}
@@ -75,25 +91,30 @@ func serve(args []string) error {
 	server := &http.Server{
 		Addr:              *listen,
 		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, done := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer done()
-		_ = server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shut down HTTP server", "error", err)
+		}
 	}()
-	logger.Info("CodeAtlas ready", "url", "http://"+*listen, "data_dir", *dataDir)
+	if repo := flags.Arg(0); repo != "" {
+		go registerOnStart(ctx, "http://"+*listen, repo, logger)
+	}
+	logger.Info("CodeAtlas ready", "url", "http://"+*listen, "data_dir", *dataDir, "database", *databasePath)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+		return fmt.Errorf("serve HTTP: %w", err)
 	}
 	return nil
 }
 
 func add(args []string) error {
 	flags := flag.NewFlagSet("add", flag.ContinueOnError)
-	serverURL := flags.String("server", env("CODEATLAS_URL", "http://127.0.0.1:7331"), "running CodeAtlas URL")
+	serverURL := flags.String("server", env("CODEATLAS_URL", defaultServerURL), "running CodeAtlas URL")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -102,15 +123,22 @@ func add(args []string) error {
 	}
 	absolute, err := filepath.Abs(flags.Arg(0))
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve repository path: %w", err)
 	}
-	payload, _ := json.Marshal(model.CreateProjectRequest{Source: model.ProjectSource{Type: model.SourceLocal, Path: absolute}})
-	request, err := http.NewRequest(http.MethodPost, *serverURL+"/api/v1/projects", bytes.NewReader(payload))
+	payload, err := json.Marshal(model.CreateProjectRequest{
+		Source: model.ProjectSource{Type: model.SourceLocal, Path: absolute},
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("encode project request: %w", err)
+	}
+	endpoint := strings.TrimRight(*serverURL, "/") + "/api/v1/projects"
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create project request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	client := &http.Client{Timeout: requestTimeout}
+	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("contact local CodeAtlas server: %w", err)
 	}
@@ -120,10 +148,65 @@ func add(args []string) error {
 	}
 	var created model.CreateProjectResponse
 	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
-		return err
+		return fmt.Errorf("decode server response: %w", err)
 	}
 	fmt.Printf("Queued project %s (analysis %s)\n", created.ProjectID, created.AnalysisRunID)
 	return nil
+}
+
+// registerOnStart waits for the just-started local server to become healthy and
+// then registers the repository passed positionally to `serve`, so a first run
+// needs no separate `add` step.
+func registerOnStart(ctx context.Context, serverURL, repoPath string, logger *slog.Logger) {
+	absolute, err := filepath.Abs(repoPath)
+	if err != nil {
+		logger.Error("resolve repository path", "error", err)
+		return
+	}
+	base := strings.TrimRight(serverURL, "/")
+	client := &http.Client{Timeout: requestTimeout}
+	ready := false
+	for attempt := 0; attempt < 50; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		if response, err := client.Get(base + "/api/v1/health"); err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		logger.Error("register repository: server did not become ready", "path", absolute)
+		return
+	}
+	payload, err := json.Marshal(model.CreateProjectRequest{
+		Source: model.ProjectSource{Type: model.SourceLocal, Path: absolute},
+	})
+	if err != nil {
+		logger.Error("encode project request", "error", err)
+		return
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/projects", bytes.NewReader(payload))
+	if err != nil {
+		logger.Error("create project request", "error", err)
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		logger.Error("register repository", "error", err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		logger.Error("register repository rejected", "status", response.Status, "path", absolute)
+		return
+	}
+	logger.Info("registered repository", "path", absolute)
 }
 
 func env(name, fallback string) string {
@@ -132,6 +215,7 @@ func env(name, fallback string) string {
 	}
 	return fallback
 }
+
 func defaultDataDir() string {
 	root, err := os.UserCacheDir()
 	if err != nil {
@@ -139,6 +223,7 @@ func defaultDataDir() string {
 	}
 	return filepath.Join(root, "CodeAtlas")
 }
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:\n  codeatlas serve [flags]\n  codeatlas add <absolute-path>")
 }

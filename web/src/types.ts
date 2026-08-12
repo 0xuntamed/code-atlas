@@ -1,6 +1,9 @@
 export type SourceType = 'local' | 'git'
 export type ProjectStatus = 'queued' | 'analyzing' | 'ready' | 'failed'
-export type GraphView = 'architecture' | 'flow' | 'impact'
+// A node's role in a selected node's blast radius.
+export type ImpactDirection = 'root' | 'dependent' | 'dependency' | 'both'
+// Which side of the blast radius to show.
+export type ImpactFilter = 'both' | 'dependents' | 'dependencies'
 
 export interface AnalysisRun {
   id: string
@@ -50,6 +53,7 @@ export interface Entity {
   range: SourceRange
   metadata?: Record<string, unknown>
   distance?: number
+  direction?: ImpactDirection
   isTest?: boolean
 }
 

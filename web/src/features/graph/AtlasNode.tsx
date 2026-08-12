@@ -1,43 +1,59 @@
 import { memo } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import { Icon, type IconName } from '../../components/Icon'
+import { Icon } from '../../components/Icon'
+import { kindMeta } from '../../lib/entityKinds'
 import { entityKindLabel } from '../../lib/graph'
-import type { Entity } from '../../types'
+import type { Entity, ImpactDirection } from '../../types'
 
-export type AtlasFlowNode = Node<{ entity: Entity; compact: boolean }, 'atlas'>
+export type AtlasFlowNode = Node<
+  {
+    entity: Entity
+    compact: boolean
+    direction: 'horizontal' | 'vertical'
+    // Blast-radius role when a node is selected; dimmed nodes are outside it.
+    impactDirection?: ImpactDirection
+    dimmed?: boolean
+  },
+  'atlas'
+>
 
-const toneClasses: Record<string, string> = {
-  route: 'border-amber-400/30 bg-amber-400/[0.07] text-amber-200',
-  function: 'border-sky-400/25 bg-sky-400/[0.06] text-sky-200',
-  method: 'border-sky-400/25 bg-sky-400/[0.06] text-sky-200',
-  class: 'border-violet-400/25 bg-violet-400/[0.06] text-violet-200',
-  struct: 'border-violet-400/25 bg-violet-400/[0.06] text-violet-200',
-  interface: 'border-violet-400/25 bg-violet-400/[0.06] text-violet-200',
-  module: 'border-primary/30 bg-primary/[0.07] text-primary',
-  package: 'border-primary/30 bg-primary/[0.07] text-primary',
-  file: 'border-border-strong bg-panel-raised text-muted',
-  external_symbol: 'border-rose-400/20 bg-rose-400/[0.05] text-rose-200',
-  unresolved_symbol: 'border-border bg-canvas-raised text-dim',
+// Border + ring per blast-radius role: the changed node, what breaks (dependents),
+// and what it relies on (dependencies).
+const directionClasses: Record<ImpactDirection, string> = {
+  root: '!border-primary ring-2 ring-primary/45',
+  dependent: '!border-rose-400 ring-2 ring-rose-400/40',
+  dependency: '!border-sky-400 ring-2 ring-sky-400/40',
+  both: '!border-violet-400 ring-2 ring-violet-400/40',
 }
 
 export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<AtlasFlowNode>) {
-  const { entity, compact } = data
+  const { entity, compact, direction, impactDirection, dimmed } = data
+  const meta = kindMeta(entity.kind)
+  const isGroup = entity.metadata?.group === true
+  const affectedCount =
+    typeof entity.metadata?.affectedCount === 'number' ? entity.metadata.affectedCount : 0
   const expandable = entity.kind === 'module' || entity.kind === 'file'
-  const stats = moduleStats(entity)
-  const icon = iconForKind(entity.kind)
+  const stats = isGroup ? `${affectedCount} affected · expand` : moduleStats(entity)
+  const targetPosition = direction === 'vertical' ? Position.Top : Position.Left
+  const sourcePosition = direction === 'vertical' ? Position.Bottom : Position.Right
+  const emphasis = impactDirection
+    ? directionClasses[impactDirection]
+    : selected
+      ? '!border-primary ring-2 ring-primary/30 shadow-[0_18px_45px_oklch(0.03_0.01_244/0.6)]'
+      : ''
 
   return (
     <article
-      className={`group relative w-[214px] rounded-card border px-3.5 py-3 shadow-[0_12px_35px_oklch(0.03_0.01_244/0.28)] transition-[border-color,box-shadow,opacity,transform] ${toneClasses[entity.kind] ?? toneClasses.file} ${selected ? 'border-primary ring-2 ring-primary/20 shadow-[0_18px_45px_oklch(0.03_0.01_244/0.55)]' : ''} ${entity.distance && entity.distance > 3 ? 'opacity-70' : ''} ${compact ? 'py-2.5' : ''}`}
+      className={`group relative w-[214px] rounded-card border bg-panel-raised px-3.5 py-3 shadow-[0_10px_30px_oklch(0.03_0.01_244/0.45)] transition-[border-color,box-shadow,opacity,transform] ${meta.tone} ${emphasis} ${dimmed ? 'opacity-25' : entity.distance && entity.distance > 3 ? 'opacity-75' : ''} ${compact ? 'py-2.5' : ''}`}
     >
       <Handle
-        className="!size-2.5 !border-2 !border-canvas !bg-border-strong"
-        position={Position.Left}
+        className="!size-2.5 !border-2 !border-canvas !bg-panel-raised transition-colors group-hover:!bg-primary"
+        position={targetPosition}
         type="target"
       />
       <div className="flex items-center gap-2">
         <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-current/15 bg-current/8">
-          <Icon className="size-3.5" name={icon} />
+          <Icon className="size-3.5" name={meta.icon} />
         </span>
         <div className="min-w-0 flex-1">
           <span className="block text-[8px] font-bold uppercase tracking-[0.16em] opacity-65">
@@ -50,7 +66,12 @@ export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<A
             {entity.name}
           </strong>
         </div>
-        {expandable ? (
+        {isGroup ? (
+          <Icon
+            className="size-3.5 shrink-0 rotate-90 opacity-60 transition-transform group-hover:translate-y-0.5"
+            name="chevron-right"
+          />
+        ) : expandable ? (
           <Icon
             className="size-3.5 shrink-0 opacity-45 transition-transform group-hover:translate-x-0.5"
             name="chevron-right"
@@ -70,8 +91,8 @@ export const AtlasNode = memo(function AtlasNode({ data, selected }: NodeProps<A
         </div>
       ) : null}
       <Handle
-        className="!size-2.5 !border-2 !border-canvas !bg-border-strong"
-        position={Position.Right}
+        className="!size-2.5 !border-2 !border-canvas !bg-panel-raised transition-colors group-hover:!bg-primary"
+        position={sourcePosition}
         type="source"
       />
     </article>
@@ -89,13 +110,4 @@ function moduleStats(entity: Entity): string | undefined {
 function metadataNumber(entity: Entity, key: string): number {
   const value = entity.metadata?.[key]
   return typeof value === 'number' ? value : 0
-}
-
-function iconForKind(kind: string): IconName {
-  if (kind === 'route') return 'route'
-  if (kind === 'module' || kind === 'package') return 'folder'
-  if (kind === 'file') return 'file'
-  if (kind === 'external_symbol' || kind === 'unresolved_symbol') return 'external'
-  if (kind === 'class' || kind === 'struct' || kind === 'interface') return 'layers'
-  return 'code'
 }

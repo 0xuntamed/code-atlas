@@ -4,7 +4,7 @@ import { api, APIError } from '../../api'
 import { Button } from '../../components/Button'
 import { Icon } from '../../components/Icon'
 import { entityKindLabel } from '../../lib/graph'
-import type { Entity, GraphView, SourceEvidence } from '../../types'
+import type { Entity, SourceEvidence } from '../../types'
 
 const LocalSourceEditor = lazy(() => import('./LocalSourceEditor'))
 const preloadSourceEditor = () => void import('./LocalSourceEditor')
@@ -14,13 +14,11 @@ export function EntityInspector({
   entity,
   onClose,
   onExplore,
-  onViewChange,
 }: {
   projectId: string
   entity?: Entity
   onClose: () => void
   onExplore: (entity: Entity) => void
-  onViewChange: (view: GraphView) => void
 }) {
   const [sourceOpen, setSourceOpen] = useState(false)
   const source = useQuery({
@@ -84,23 +82,15 @@ export function EntityInspector({
         <section className="border-b border-border px-4 py-4">
           <span className="text-[9px] font-bold uppercase tracking-[0.17em] text-dim">Actions</span>
           <div className="mt-3 grid grid-cols-2 gap-2">
+            <p className="col-span-2 -mt-1 mb-1 text-[10px] leading-4 text-muted">
+              Its blast radius is highlighted on the map.
+            </p>
             {expandable ? (
               <Button className="col-span-2" onClick={() => onExplore(entity)} size="sm">
                 <Icon className="size-3.5" name="architecture" />
                 Open contents
               </Button>
-            ) : (
-              <>
-                <Button intent="secondary" onClick={() => onViewChange('flow')} size="sm">
-                  <Icon className="size-3.5" name="flow" />
-                  Trace flow
-                </Button>
-                <Button intent="secondary" onClick={() => onViewChange('impact')} size="sm">
-                  <Icon className="size-3.5" name="impact" />
-                  Check impact
-                </Button>
-              </>
-            )}
+            ) : null}
             {entity.fileId ? (
               <Button
                 className="col-span-2"

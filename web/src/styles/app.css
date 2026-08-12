@@ -197,6 +197,19 @@
   fill: var(--ui-canvas-raised);
 }
 
+.react-flow__edge-path {
+  filter: drop-shadow(0 2px 3px oklch(0.03 0.01 244 / 0.35));
+}
+
+/* Keep the edge layer strictly beneath the opaque node cards. */
+.react-flow__edges {
+  z-index: 0 !important;
+}
+
+.react-flow__node-atlas {
+  z-index: 2 !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

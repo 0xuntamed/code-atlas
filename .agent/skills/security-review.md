@@ -21,7 +21,7 @@ Assume an attacker can supply crafted HTTP requests, repository contents, file n
 - Canonical path and containment checks happen before reads, writes, deletes, or Git operations.
 - Symlinks, junctions, traversal segments, case differences, and TOCTOU changes cannot escape the registered repository.
 - Ignore and privacy exclusions are applied before source parsing or evidence access.
-- PostgreSQL, logs, events, caches, and errors never retain source buffers or snippets.
+- The database, logs, events, caches, and errors never retain source buffers or snippets.
 - Source evidence is served only on demand and only after its current hash matches analyzed metadata.
 
 ### Git and process execution

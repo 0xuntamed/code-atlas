@@ -1,11 +1,11 @@
 # CodeAtlas
 
-CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, Go, and Python repositories. It maps symbols, imports, calls, web routes, execution flow, and upstream/downstream impact without storing source code in PostgreSQL. The Go server ships the production React interface as embedded static assets, so no separate frontend server is required in production.
+CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, Go, and Python repositories. It maps symbols, imports, calls, web routes, execution flow, and upstream/downstream impact without storing source code in its database. It ships as a single self-contained binary: metadata lives in an embedded SQLite database (no external database process, no Docker), and the Go server serves the production React interface as embedded static assets.
 
 ## Privacy boundary
 
 - The Go analyzer reads source from the registered repository and discards each source buffer after parsing.
-- PostgreSQL stores file metadata, hashes, source ranges, symbols, relationships, and analysis status only.
+- The embedded SQLite database stores file metadata, hashes, source ranges, symbols, relationships, and analysis status only.
 - Source evidence is read from disk on demand and rejected if its hash changed after analysis.
 - The server binds to loopback and rejects non-loopback Host and Origin values.
 - Git credentials are never accepted in URLs or stored; managed clones use the local credential helper or SSH agent.
@@ -14,15 +14,15 @@ CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, G
 ## Requirements
 
 - Go 1.26+
-- Node.js 22.12+ (or 20.19+) and npm
-- Docker with Compose
+- Node.js 22.12+ (or 20.19+) and npm — only to build the frontend bundle
 - Git
-- A C toolchain for production Tree-sitter builds. When CGO is unavailable, CodeAtlas compiles a conservative structural parser fallback so local development remains functional.
+- A C toolchain for production Tree-sitter builds. When CGO is unavailable, CodeAtlas compiles a conservative structural parser fallback so local development remains functional. (The SQLite driver is pure Go and needs no C toolchain.)
+
+No Docker and no external database are required — metadata is stored in a local SQLite file.
 
 ## Run locally
 
 ```powershell
-docker compose up -d postgres
 cd web
 npm install
 npm run build
@@ -30,11 +30,15 @@ cd ..
 go run ./cmd/codeatlas serve
 ```
 
-Open `http://127.0.0.1:7331` and paste an absolute local repository path or an HTTPS/SSH Git URL.
+Open `http://127.0.0.1:7331` and paste an absolute local repository path or an HTTPS/SSH Git URL. You can also point CodeAtlas at a repository directly on startup, and it registers on first launch:
+
+```powershell
+go run ./cmd/codeatlas serve C:\absolute\path\to\repo
+```
 
 The header keeps repository lifecycle actions available after onboarding: add another repository, switch projects, reanalyze, remove derived metadata, or explicitly stop the local CodeAtlas process.
 
-The bundled PostgreSQL container is exposed on loopback port `5433` to avoid colliding with a conventional host PostgreSQL installation on `5432`.
+The SQLite database is created under the data directory (`<data-dir>/codeatlas.db`) on first run.
 
 During frontend development, keep the Go server running and start Vite in a second terminal. Vite defaults to `127.0.0.1:5173` and proxies `/api` to the Go server:
 
@@ -55,11 +59,11 @@ go run ./cmd/codeatlas add C:\absolute\path\to\repo
 
 Configuration:
 
-| Variable                 | Default                                                                   |
-| ------------------------ | ------------------------------------------------------------------------- |
-| `CODEATLAS_DATABASE_URL` | `postgres://codeatlas:codeatlas@127.0.0.1:5433/codeatlas?sslmode=disable` |
-| `CODEATLAS_LISTEN_ADDR`  | `127.0.0.1:7331`                                                          |
-| `CODEATLAS_DATA_DIR`     | OS user cache directory under `CodeAtlas`                                 |
+| Variable                  | Default                                    |
+| ------------------------- | ------------------------------------------ |
+| `CODEATLAS_DATABASE_PATH` | `<data-dir>/codeatlas.db`                  |
+| `CODEATLAS_LISTEN_ADDR`   | `127.0.0.1:7331`                           |
+| `CODEATLAS_DATA_DIR`      | OS user cache directory under `CodeAtlas`  |
 
 ## Frontend architecture
 
@@ -107,7 +111,7 @@ React Flow mounts only visible cards, dense views suppress persistent edge label
 - `internal/analyzer`: explicit inventory, structural entity, declaration, relationship, and resolution phases.
 - `internal/parser`: Tree-sitter adapters plus a no-CGO development fallback.
 - `internal/repository`: safe Git acquisition, discovery, hashing, and ignore rules.
-- `internal/store`: PostgreSQL migrations, durable jobs, atomic promotion, search, and graph traversal.
+- `internal/store`: embedded SQLite migrations, durable jobs, atomic promotion, search, and graph traversal.
 - `internal/webui`: generated frontend assets and the `go:embed` HTTP handler.
 - `web/src/components`: accessible UI primitives and the in-repository SVG icon system.
 - `web/src/features`: project, analysis, graph, search, file inventory, source, and workspace UI boundaries.

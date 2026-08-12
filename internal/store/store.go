@@ -2,15 +2,16 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/codeatlas/codeatlas/internal/model"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed schema.sql
@@ -18,117 +19,142 @@ var schemaSQL string
 
 var ErrNotFound = errors.New("not found")
 
-type Store struct {
-	pool *pgxpool.Pool
+// leaseDuration is how long a claimed run stays leased before another worker
+// (or the same worker after a crash) may reclaim it.
+const leaseDuration = 45 * time.Second
+
+// scanner is satisfied by both *sql.Row and *sql.Rows.
+type scanner interface {
+	Scan(dest ...any) error
 }
 
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse database configuration: %w", err)
-	}
-	config.MaxConns = 12
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+type Store struct {
+	db *sql.DB
+}
+
+// Open opens (creating if necessary) the SQLite database at path. The bundled
+// driver is pure Go, so no external database process or C toolchain is needed.
+func Open(ctx context.Context, path string) (*Store, error) {
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)", path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
+	db.SetMaxOpenConns(8)
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open SQLite database: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{db: db}, nil
 }
 
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() { _ = s.db.Close() }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("apply database schema: %w", err)
+	for _, statement := range splitStatements(schemaSQL) {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply database schema: %w", err)
+		}
 	}
 	return nil
 }
 
 func (s *Store) CreateProject(ctx context.Context, project model.Project, run model.AnalysisRun) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `
-		INSERT INTO projects (id, name, source_type, root_path, remote_url, git_ref, managed_clone, status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+	defer tx.Rollback()
+	now := nowMicros()
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO projects (id, name, source_type, root_path, remote_url, git_ref, managed_clone, status, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		project.ID, project.Name, project.SourceType, project.RootPath, project.RemoteURL,
-		project.GitRef, project.ManagedClone, model.ProjectQueued)
+		project.GitRef, boolInt(project.ManagedClone), model.ProjectQueued, now, now)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO analysis_runs (id, project_id, status, stage, message)
-		VALUES ($1,$2,$3,'queued','Waiting for the local analyzer')`, run.ID, project.ID, model.RunQueued)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO analysis_runs (id, project_id, status, stage, message, created_at)
+		VALUES (?,?,?,'queued','Waiting for the local analyzer',?)`, run.ID, project.ID, model.RunQueued, now)
 	if err != nil {
 		return fmt.Errorf("insert analysis run: %w", err)
 	}
-	return tx.Commit(ctx)
+	return tx.Commit()
 }
 
 func (s *Store) QueueAnalysis(ctx context.Context, projectID, runID string) error {
-	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO analysis_runs (id, project_id, status, stage, message)
-		SELECT $2, id, 'queued', 'queued', 'Waiting for the local analyzer'
-		FROM projects WHERE id=$1`, projectID, runID)
+	now := nowMicros()
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO analysis_runs (id, project_id, status, stage, message, created_at)
+		SELECT ?, id, 'queued', 'queued', 'Waiting for the local analyzer', ?
+		FROM projects WHERE id=?`, runID, now, projectID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
 		return ErrNotFound
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE projects SET status='queued', updated_at=now() WHERE id=$1`, projectID)
+	_, err = s.db.ExecContext(ctx, `UPDATE projects SET status='queued', updated_at=? WHERE id=?`, now, projectID)
 	return err
 }
 
-func scanRun(row pgx.Row) (*model.AnalysisRun, error) {
+func scanRun(row scanner) (*model.AnalysisRun, error) {
 	var run model.AnalysisRun
+	var started, completed sql.NullInt64
+	var created int64
 	err := row.Scan(&run.ID, &run.ProjectID, &run.Status, &run.Stage, &run.Completed,
-		&run.Total, &run.Message, &run.ErrorMessage, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+		&run.Total, &run.Message, &run.ErrorMessage, &started, &completed, &created)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return &run, err
+	if err != nil {
+		return nil, err
+	}
+	run.StartedAt = nullTime(started)
+	run.CompletedAt = nullTime(completed)
+	run.CreatedAt = microsToTime(created)
+	return &run, nil
 }
 
 const runColumns = `id, project_id, status, stage, completed, total, message, error_message, started_at, completed_at, created_at`
 
 func (s *Store) LatestRun(ctx context.Context, projectID string) (*model.AnalysisRun, error) {
-	return scanRun(s.pool.QueryRow(ctx, `SELECT `+runColumns+` FROM analysis_runs WHERE project_id=$1 ORDER BY created_at DESC LIMIT 1`, projectID))
+	return scanRun(s.db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM analysis_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1`, projectID))
 }
 
 func (s *Store) ClaimRun(ctx context.Context) (*model.AnalysisRun, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
-	row := tx.QueryRow(ctx, `
+	defer tx.Rollback()
+	now := nowMicros()
+	row := tx.QueryRowContext(ctx, `
 		SELECT `+runColumns+` FROM analysis_runs
-		WHERE status='queued' OR (status='running' AND lease_until < now())
-		ORDER BY created_at
-		FOR UPDATE SKIP LOCKED LIMIT 1`)
+		WHERE status='queued' OR (status='running' AND lease_until < ?)
+		ORDER BY created_at LIMIT 1`, now)
 	run, err := scanRun(row)
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `
-		UPDATE analysis_runs SET status='running', stage='acquiring', started_at=COALESCE(started_at,now()),
-			lease_until=now()+interval '45 seconds', message='Preparing repository'
-		WHERE id=$1`, run.ID)
+	lease := microsFromNow(leaseDuration)
+	_, err = tx.ExecContext(ctx, `
+		UPDATE analysis_runs SET status='running', stage='acquiring', started_at=COALESCE(started_at,?),
+			lease_until=?, message='Preparing repository'
+		WHERE id=?`, now, lease, run.ID)
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE projects SET status='analyzing', updated_at=now() WHERE id=$1`, run.ProjectID)
+	_, err = tx.ExecContext(ctx, `UPDATE projects SET status='analyzing', updated_at=? WHERE id=?`, now, run.ProjectID)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	run.Status = model.RunRunning
@@ -137,182 +163,191 @@ func (s *Store) ClaimRun(ctx context.Context) (*model.AnalysisRun, error) {
 }
 
 func (s *Store) UpdateRun(ctx context.Context, runID, stage string, completed, total int, message string) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE analysis_runs SET stage=$2, completed=$3, total=$4, message=$5,
-			lease_until=now()+interval '45 seconds' WHERE id=$1`, runID, stage, completed, total, message)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE analysis_runs SET stage=?, completed=?, total=?, message=?, lease_until=? WHERE id=?`,
+		stage, completed, total, message, microsFromNow(leaseDuration), runID)
 	return err
 }
 
 func (s *Store) FailRun(ctx context.Context, runID, projectID, safeMessage string) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `
-		UPDATE analysis_runs SET status='failed', stage='failed', error_message=$2,
-			message='Analysis failed', lease_until=NULL, completed_at=now() WHERE id=$1`, runID, safeMessage)
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE analysis_runs SET status='failed', stage='failed', error_message=?,
+			message='Analysis failed', lease_until=NULL, completed_at=? WHERE id=?`, safeMessage, nowMicros(), runID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE projects SET status='failed', updated_at=now() WHERE id=$1`, projectID)
+	_, err = tx.ExecContext(ctx, `UPDATE projects SET status='failed', updated_at=? WHERE id=?`, nowMicros(), projectID)
 	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return tx.Commit()
 }
 
 func (s *Store) Project(ctx context.Context, id string) (*model.Project, error) {
-	var p model.Project
-	err := s.pool.QueryRow(ctx, `
+	project, err := scanProject(s.db.QueryRowContext(ctx, `
 		SELECT id,name,source_type,root_path,remote_url,git_ref,current_commit,managed_clone,status,
-			COALESCE(active_run_id,''),created_at,updated_at FROM projects WHERE id=$1`, id).
-		Scan(&p.ID, &p.Name, &p.SourceType, &p.RootPath, &p.RemoteURL, &p.GitRef,
-			&p.CurrentCommit, &p.ManagedClone, &p.Status, &p.ActiveRunID, &p.CreatedAt, &p.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+			active_run_id,created_at,updated_at FROM projects WHERE id=?`, id))
+	if err != nil {
+		return nil, err
+	}
+	if run, err := s.LatestRun(ctx, id); err == nil {
+		project.LatestRun = run
+	}
+	return project, nil
+}
+
+func (s *Store) Projects(ctx context.Context) ([]model.Project, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id,name,source_type,root_path,remote_url,git_ref,current_commit,managed_clone,status,
+			active_run_id,created_at,updated_at FROM projects ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	projects := make([]model.Project, 0)
+	for rows.Next() {
+		project, err := scanProject(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		projects = append(projects, *project)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for index := range projects {
+		if run, err := s.LatestRun(ctx, projects[index].ID); err == nil {
+			projects[index].LatestRun = run
+		}
+	}
+	return projects, nil
+}
+
+func scanProject(row scanner) (*model.Project, error) {
+	var p model.Project
+	var managed int
+	var active sql.NullString
+	var created, updated int64
+	err := row.Scan(&p.ID, &p.Name, &p.SourceType, &p.RootPath, &p.RemoteURL, &p.GitRef,
+		&p.CurrentCommit, &managed, &p.Status, &active, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	run, err := s.LatestRun(ctx, id)
-	if err == nil {
-		p.LatestRun = run
-	}
+	p.ManagedClone = managed != 0
+	p.ActiveRunID = active.String
+	p.CreatedAt = microsToTime(created)
+	p.UpdatedAt = microsToTime(updated)
 	return &p, nil
 }
 
-func (s *Store) Projects(ctx context.Context) ([]model.Project, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT p.id,p.name,p.source_type,p.root_path,p.remote_url,p.git_ref,p.current_commit,p.managed_clone,
-			p.status,COALESCE(p.active_run_id,''),p.created_at,p.updated_at,
-			r.id,r.status,r.stage,r.completed,r.total,r.message,r.error_message,r.started_at,r.completed_at,r.created_at
-		FROM projects p
-		LEFT JOIN LATERAL (
-			SELECT * FROM analysis_runs ar WHERE ar.project_id=p.id ORDER BY ar.created_at DESC LIMIT 1
-		) r ON true ORDER BY p.created_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	projects := make([]model.Project, 0)
-	for rows.Next() {
-		var p model.Project
-		var runID, runStatus, runStage, runMessage, runError *string
-		var completed, total *int
-		var started, runCompleted, runCreated *time.Time
-		if err := rows.Scan(&p.ID, &p.Name, &p.SourceType, &p.RootPath, &p.RemoteURL, &p.GitRef, &p.CurrentCommit,
-			&p.ManagedClone, &p.Status, &p.ActiveRunID, &p.CreatedAt, &p.UpdatedAt,
-			&runID, &runStatus, &runStage, &completed, &total, &runMessage, &runError, &started, &runCompleted, &runCreated); err != nil {
-			return nil, err
-		}
-		if runID != nil {
-			p.LatestRun = &model.AnalysisRun{ID: *runID, ProjectID: p.ID, Status: value(runStatus), Stage: value(runStage),
-				Completed: intValue(completed), Total: intValue(total), Message: value(runMessage), ErrorMessage: value(runError),
-				StartedAt: started, CompletedAt: runCompleted, CreatedAt: *runCreated}
-		}
-		projects = append(projects, p)
-	}
-	return projects, rows.Err()
-}
-
-func value(v *string) string {
-	if v == nil {
-		return ""
-	}
-	return *v
-}
-func intValue(v *int) int {
-	if v == nil {
-		return 0
-	}
-	return *v
-}
-
 func (s *Store) UpdateProjectCommit(ctx context.Context, projectID, commit string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE projects SET current_commit=$2, updated_at=now() WHERE id=$1`, projectID, commit)
+	_, err := s.db.ExecContext(ctx, `UPDATE projects SET current_commit=?, updated_at=? WHERE id=?`, commit, nowMicros(), projectID)
 	return err
 }
 
 func (s *Store) ReplaceRunData(ctx context.Context, runID string, files []model.FileRecord, entities []model.Entity, relationships []model.Relationship) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM relationships WHERE run_id=$1`, runID); err != nil {
-		return err
+	defer tx.Rollback()
+	// Delete children before parents so foreign keys stay satisfied.
+	for _, table := range []string{"relationships", "entities", "files"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE run_id=?`, runID); err != nil {
+			return err
+		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM entities WHERE run_id=$1`, runID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM files WHERE run_id=$1`, runID); err != nil {
-		return err
-	}
-	_, err = tx.CopyFrom(ctx, pgx.Identifier{"files"}, []string{"id", "project_id", "run_id", "path", "language", "classification", "ignore_reason", "is_directory", "is_test", "size_bytes", "content_hash"},
-		pgx.CopyFromSlice(len(files), func(i int) ([]any, error) {
-			f := files[i]
-			return []any{f.ID, f.ProjectID, f.RunID, f.Path, f.Language, f.Classification, f.IgnoreReason, f.IsDirectory, f.IsTest, f.SizeBytes, f.ContentHash}, nil
-		}))
-	if err != nil {
-		return fmt.Errorf("insert file metadata: %w", err)
-	}
-	_, err = tx.CopyFrom(ctx, pgx.Identifier{"entities"}, []string{"id", "project_id", "run_id", "file_id", "kind", "name", "qualified_name", "language", "start_line", "start_column", "end_line", "end_column", "is_test", "metadata"},
-		pgx.CopyFromSlice(len(entities), func(i int) ([]any, error) {
-			e := entities[i]
-			metadata, _ := json.Marshal(e.Metadata)
-			return []any{e.ID, e.ProjectID, e.RunID, nullable(e.FileID), e.Kind, e.Name, e.QualifiedName, e.Language, e.Range.StartLine, e.Range.StartColumn, e.Range.EndLine, e.Range.EndColumn, e.IsTest, metadata}, nil
-		}))
-	if err != nil {
-		return fmt.Errorf("insert entity metadata: %w", err)
-	}
-	_, err = tx.CopyFrom(ctx, pgx.Identifier{"relationships"}, []string{"id", "project_id", "run_id", "source_entity_id", "target_entity_id", "relationship_type", "confidence", "evidence_file_id", "start_line", "start_column", "end_line", "end_column", "resolution_state", "metadata"},
-		pgx.CopyFromSlice(len(relationships), func(i int) ([]any, error) {
-			r := relationships[i]
-			metadata, _ := json.Marshal(r.Metadata)
-			return []any{r.ID, r.ProjectID, r.RunID, r.SourceID, r.TargetID, r.Kind, r.Confidence, nullable(r.EvidenceFileID), r.Range.StartLine, r.Range.StartColumn, r.Range.EndLine, r.Range.EndColumn, r.Resolution, metadata}, nil
-		}))
-	if err != nil {
-		return fmt.Errorf("insert relationship metadata: %w", err)
-	}
-	return tx.Commit(ctx)
-}
 
-func nullable(value string) any {
-	if value == "" {
-		return nil
+	fileStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO files (id, project_id, run_id, path, language, classification, ignore_reason, is_directory, is_test, size_bytes, content_hash)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
 	}
-	return value
+	defer fileStmt.Close()
+	for _, f := range files {
+		if _, err := fileStmt.ExecContext(ctx, f.ID, f.ProjectID, f.RunID, f.Path, f.Language, f.Classification,
+			f.IgnoreReason, boolInt(f.IsDirectory), boolInt(f.IsTest), f.SizeBytes, f.ContentHash); err != nil {
+			return fmt.Errorf("insert file metadata: %w", err)
+		}
+	}
+
+	entityStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO entities (id, project_id, run_id, file_id, kind, name, qualified_name, language, start_line, start_column, end_line, end_column, is_test, metadata)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer entityStmt.Close()
+	for _, e := range entities {
+		if _, err := entityStmt.ExecContext(ctx, e.ID, e.ProjectID, e.RunID, nullString(e.FileID), e.Kind, e.Name,
+			e.QualifiedName, e.Language, e.Range.StartLine, e.Range.StartColumn, e.Range.EndLine, e.Range.EndColumn,
+			boolInt(e.IsTest), marshalMeta(e.Metadata)); err != nil {
+			return fmt.Errorf("insert entity metadata: %w", err)
+		}
+	}
+
+	relationshipStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO relationships (id, project_id, run_id, source_entity_id, target_entity_id, relationship_type, confidence, evidence_file_id, start_line, start_column, end_line, end_column, resolution_state, metadata)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer relationshipStmt.Close()
+	for _, r := range relationships {
+		if _, err := relationshipStmt.ExecContext(ctx, r.ID, r.ProjectID, r.RunID, r.SourceID, r.TargetID, r.Kind,
+			r.Confidence, nullString(r.EvidenceFileID), r.Range.StartLine, r.Range.StartColumn, r.Range.EndLine,
+			r.Range.EndColumn, r.Resolution, marshalMeta(r.Metadata)); err != nil {
+			return fmt.Errorf("insert relationship metadata: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *Store) PromoteRun(ctx context.Context, runID, projectID string) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `UPDATE analysis_runs SET status='ready',stage='ready',message='Analysis complete',lease_until=NULL,completed_at=now() WHERE id=$1`, runID)
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `UPDATE analysis_runs SET status='ready',stage='ready',message='Analysis complete',lease_until=NULL,completed_at=? WHERE id=?`, nowMicros(), runID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE projects SET active_run_id=$1,status='ready',updated_at=now() WHERE id=$2`, runID, projectID)
+	_, err = tx.ExecContext(ctx, `UPDATE projects SET active_run_id=?,status='ready',updated_at=? WHERE id=?`, runID, nowMicros(), projectID)
 	if err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
-	_, _ = s.pool.Exec(ctx, `
-		DELETE FROM analysis_runs WHERE project_id=$1 AND id<>$2 AND status='ready' AND created_at < now()-interval '1 minute'`, projectID, runID)
+	cutoff := microsFromNow(-time.Minute)
+	_, _ = s.db.ExecContext(ctx, `
+		DELETE FROM analysis_runs WHERE project_id=? AND id<>? AND status='ready' AND created_at < ?`, projectID, runID, cutoff)
 	return nil
 }
 
 func (s *Store) DeleteProject(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id=$1`, id)
+	result, err := s.db.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -322,11 +357,11 @@ func (s *Store) Files(ctx context.Context, projectID, classification string, lim
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT f.id,f.project_id,f.run_id,f.path,f.language,f.classification,f.ignore_reason,f.is_directory,f.size_bytes,f.is_test
 		FROM files f JOIN projects p ON p.active_run_id=f.run_id
-		WHERE f.project_id=$1 AND ($2='' OR f.classification=$2)
-		ORDER BY f.path LIMIT $3`, projectID, classification, limit)
+		WHERE f.project_id=? AND (?='' OR f.classification=?)
+		ORDER BY f.path LIMIT ?`, projectID, classification, classification, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -334,26 +369,31 @@ func (s *Store) Files(ctx context.Context, projectID, classification string, lim
 	result := make([]model.FileRecord, 0)
 	for rows.Next() {
 		var f model.FileRecord
+		var isDirectory, isTest int
 		if err := rows.Scan(&f.ID, &f.ProjectID, &f.RunID, &f.Path, &f.Language, &f.Classification, &f.IgnoreReason,
-			&f.IsDirectory, &f.SizeBytes, &f.IsTest); err != nil {
+			&isDirectory, &f.SizeBytes, &isTest); err != nil {
 			return nil, err
 		}
+		f.IsDirectory = isDirectory != 0
+		f.IsTest = isTest != 0
 		result = append(result, f)
 	}
 	return result, rows.Err()
 }
 
-func scanEntity(row pgx.Row) (*model.Entity, error) {
+func scanEntity(row scanner) (*model.Entity, error) {
 	var e model.Entity
 	var metadata []byte
+	var isTest int
 	err := row.Scan(&e.ID, &e.ProjectID, &e.RunID, &e.FileID, &e.Kind, &e.Name, &e.QualifiedName, &e.Language,
-		&e.Range.StartLine, &e.Range.StartColumn, &e.Range.EndLine, &e.Range.EndColumn, &e.IsTest, &metadata)
-	if errors.Is(err, pgx.ErrNoRows) {
+		&e.Range.StartLine, &e.Range.StartColumn, &e.Range.EndLine, &e.Range.EndColumn, &isTest, &metadata)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	e.IsTest = isTest != 0
 	_ = json.Unmarshal(metadata, &e.Metadata)
 	return &e, nil
 }
@@ -362,16 +402,18 @@ const entityColumns = `e.id,e.project_id,e.run_id,COALESCE(e.file_id,''),e.kind,
 	e.start_line,e.start_column,e.end_line,e.end_column,e.is_test,e.metadata`
 
 func (s *Store) Entity(ctx context.Context, projectID, entityID string) (*model.Entity, error) {
-	return scanEntity(s.pool.QueryRow(ctx, `SELECT `+entityColumns+` FROM entities e JOIN projects p ON p.active_run_id=e.run_id WHERE e.project_id=$1 AND e.id=$2`, projectID, entityID))
+	return scanEntity(s.db.QueryRowContext(ctx, `SELECT `+entityColumns+` FROM entities e JOIN projects p ON p.active_run_id=e.run_id WHERE e.project_id=? AND e.id=?`, projectID, entityID))
 }
 
 func (s *Store) Search(ctx context.Context, projectID, query string, limit int) ([]model.Entity, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+entityColumns+` FROM entities e JOIN projects p ON p.active_run_id=e.run_id
-		WHERE e.project_id=$1 AND (e.qualified_name ILIKE '%'||$2||'%' OR e.name ILIKE '%'||$2||'%')
-		ORDER BY CASE WHEN lower(e.name)=lower($2) THEN 0 ELSE 1 END, similarity(e.qualified_name,$2) DESC, e.qualified_name LIMIT $3`, projectID, query, limit)
+	pattern := "%" + query + "%"
+	rows, err := s.db.QueryContext(ctx, `SELECT `+entityColumns+` FROM entities e JOIN projects p ON p.active_run_id=e.run_id
+		WHERE e.project_id=? AND (e.qualified_name LIKE ? OR e.name LIKE ?)
+		ORDER BY CASE WHEN lower(e.name)=lower(?) THEN 0 ELSE 1 END, length(e.qualified_name), e.qualified_name LIMIT ?`,
+		projectID, pattern, pattern, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -397,20 +439,106 @@ type EvidenceRecord struct {
 func (s *Store) Evidence(ctx context.Context, projectID, entityID string) (*EvidenceRecord, error) {
 	var record EvidenceRecord
 	var metadata []byte
-	err := s.pool.QueryRow(ctx, `
+	var isTest int
+	err := s.db.QueryRowContext(ctx, `
 		SELECT `+entityColumns+`,p.root_path,f.path,f.content_hash
 		FROM entities e JOIN projects p ON p.active_run_id=e.run_id JOIN files f ON f.id=e.file_id
-		WHERE e.project_id=$1 AND e.id=$2`, projectID, entityID).
+		WHERE e.project_id=? AND e.id=?`, projectID, entityID).
 		Scan(&record.Entity.ID, &record.Entity.ProjectID, &record.Entity.RunID, &record.Entity.FileID, &record.Entity.Kind,
 			&record.Entity.Name, &record.Entity.QualifiedName, &record.Entity.Language, &record.Entity.Range.StartLine,
-			&record.Entity.Range.StartColumn, &record.Entity.Range.EndLine, &record.Entity.Range.EndColumn, &record.Entity.IsTest,
+			&record.Entity.Range.StartColumn, &record.Entity.Range.EndLine, &record.Entity.Range.EndColumn, &isTest,
 			&metadata, &record.RootPath, &record.RelativePath, &record.ContentHash)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	record.Entity.IsTest = isTest != 0
 	_ = json.Unmarshal(metadata, &record.Entity.Metadata)
 	return &record, nil
+}
+
+// --- helpers ---
+
+func nowMicros() int64 { return time.Now().UTC().UnixMicro() }
+
+func microsFromNow(d time.Duration) int64 { return time.Now().Add(d).UTC().UnixMicro() }
+
+func microsToTime(v int64) time.Time { return time.UnixMicro(v).UTC() }
+
+func nullTime(v sql.NullInt64) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t := microsToTime(v.Int64)
+	return &t
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func nullString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func marshalMeta(m map[string]any) string {
+	if m == nil {
+		return "{}"
+	}
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
+func splitStatements(script string) []string {
+	parts := strings.Split(script, ";")
+	statements := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		statements = append(statements, part)
+	}
+	return statements
+}
+
+// placeholders returns "?,?,..." with n placeholders for building IN clauses.
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// scanIDs collects a single TEXT id column from a result set and closes it.
+func scanIDs(rows *sql.Rows) ([]string, error) {
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// stringArgs converts a []string to []any for variadic query arguments.
+func stringArgs(values []string) []any {
+	args := make([]any, len(values))
+	for i, v := range values {
+		args[i] = v
+	}
+	return args
 }
