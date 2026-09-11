@@ -1,12 +1,19 @@
-const swatches: { color: string; label: string }[] = [
-  { color: 'var(--color-primary, #6ea8fe)', label: 'Changing this' },
-  { color: '#fb7185', label: 'Breaks (dependents)' },
-  { color: '#38bdf8', label: 'Relies on (dependencies)' },
-  { color: '#a78bfa', label: 'Both' },
-]
+const breaks = { color: '#fb7185', label: 'Breaks (dependents)' }
+const relies = { color: '#38bdf8', label: 'Relies on (dependencies)' }
+const both = { color: '#a78bfa', label: 'Both' }
+const selecting = { color: 'var(--color-primary, #6ea8fe)', label: 'Changing this' }
+const changed = { color: '#fbbf24', label: 'Changed' }
 
-// Color key for the blast-radius view. Rendered only while a node is selected.
-export function ImpactLegend({ className = '' }: { className?: string }) {
+// Color key for the blast-radius view. In review mode the seed swatch reads
+// "Changed" (amber); otherwise it reads "Changing this" (the selected node).
+export function ImpactLegend({
+  className = '',
+  review = false,
+}: {
+  className?: string
+  review?: boolean
+}) {
+  const swatches = [review ? changed : selecting, breaks, relies, both]
   return (
     <ul className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${className}`}>
       {swatches.map((swatch) => (

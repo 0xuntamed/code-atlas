@@ -6,6 +6,9 @@ interface AtlasState {
   selectedEntityId: string
   // Selecting any node reveals its blast radius; this chooses which side to show.
   impactFilter: ImpactFilter
+  // Review mode overrides selection and shows the blast radius of the working
+  // tree's uncommitted changes.
+  reviewMode: boolean
   // Drill-down trail for the structural map (overview → module → file). Lives in
   // the store so it survives remounts and stays consistent with the selection.
   scopePath: ArchitectureCrumb[]
@@ -14,6 +17,7 @@ interface AtlasState {
   setProject: (id: string) => void
   selectEntity: (id: string) => void
   setImpactFilter: (filter: ImpactFilter) => void
+  setReviewMode: (on: boolean) => void
   openScope: (crumb: ArchitectureCrumb) => void
   navigateScope: (index: number) => void
   toggleTests: () => void
@@ -25,13 +29,21 @@ export const useAtlasStore = create<AtlasState>((set) => ({
   projectId: '',
   selectedEntityId: '',
   impactFilter: 'both',
+  reviewMode: false,
   scopePath: [],
   showTests: false,
   showReferences: false,
   setProject: (projectId) =>
-    set({ projectId, selectedEntityId: '', impactFilter: 'both', scopePath: [] }),
-  selectEntity: (selectedEntityId) => set({ selectedEntityId }),
+    set({
+      projectId,
+      selectedEntityId: '',
+      impactFilter: 'both',
+      reviewMode: false,
+      scopePath: [],
+    }),
+  selectEntity: (selectedEntityId) => set({ selectedEntityId, reviewMode: false }),
   setImpactFilter: (impactFilter) => set({ impactFilter }),
+  setReviewMode: (reviewMode) => set({ reviewMode }),
   openScope: (crumb) =>
     set((state) => {
       const existing = state.scopePath.findIndex((entry) => entry.id === crumb.id)

@@ -1,6 +1,6 @@
 import { Icon } from '../../components/Icon'
 import { ImpactLegend } from '../graph/ImpactLegend'
-import type { GraphResponse, ImpactFilter } from '../../types'
+import type { ChangesSummary, GraphResponse, ImpactFilter } from '../../types'
 import { SkippedFiles } from '../files/SkippedFiles'
 import { SymbolSearch } from '../search/SymbolSearch'
 
@@ -14,6 +14,8 @@ export function WorkspaceSidebar({
   projectId,
   impactFilter,
   impactActive,
+  reviewMode,
+  reviewSummary,
   expandedCount,
   graph,
   hiddenTotal,
@@ -23,11 +25,14 @@ export function WorkspaceSidebar({
   onToggleTests,
   onToggleReferences,
   onImpactFilterChange,
+  onToggleReview,
   onCollapseFiles,
 }: {
   projectId: string
   impactFilter: ImpactFilter
   impactActive: boolean
+  reviewMode: boolean
+  reviewSummary?: ChangesSummary
   expandedCount: number
   graph?: GraphResponse
   hiddenTotal: number
@@ -37,17 +42,48 @@ export function WorkspaceSidebar({
   onToggleTests: () => void
   onToggleReferences: () => void
   onImpactFilterChange: (filter: ImpactFilter) => void
+  onToggleReview: () => void
   onCollapseFiles: () => void
 }) {
   return (
     <aside className="min-h-0 overflow-y-auto border-b border-border bg-canvas-raised/72 p-3 md:border-b-0 md:border-r md:p-4">
       <SymbolSearch projectId={projectId} showTests={showTests} onSelect={onSelect} />
 
+      <button
+        aria-pressed={reviewMode}
+        className={`mt-3 flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors ${reviewMode ? 'border-amber-400/50 bg-amber-400/10 text-amber-300' : 'border-border text-muted hover:border-border-strong hover:text-foreground'}`}
+        onClick={onToggleReview}
+        type="button"
+      >
+        <span
+          className={`grid size-7 shrink-0 place-items-center rounded-lg ${reviewMode ? 'bg-amber-400/15 text-amber-300' : 'bg-panel text-dim'}`}
+        >
+          <Icon className="size-4" name="diff" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <strong className="block text-xs font-semibold">Review changes</strong>
+          <small className="block text-[9px] text-dim">
+            {reviewMode ? 'Showing uncommitted changes' : 'Blast radius of your edits'}
+          </small>
+        </span>
+        {reviewMode ? <Icon className="size-3.5 shrink-0" name="close" /> : null}
+      </button>
+
       <section className="mt-4">
         <span className="px-1 text-[9px] font-bold uppercase tracking-[0.18em] text-dim">
-          Blast radius
+          {reviewMode ? 'Change review' : 'Blast radius'}
         </span>
-        {impactActive ? (
+        {reviewMode ? (
+          <>
+            <dl className="mt-2 grid grid-cols-2 gap-1.5">
+              <ReviewStat label="files" value={reviewSummary?.filesChanged} />
+              <ReviewStat label="symbols" value={reviewSummary?.symbolsChanged} />
+              <ReviewStat label="routes hit" value={reviewSummary?.routesAffected} tone="rose" />
+              <ReviewStat label="tests hit" value={reviewSummary?.testsAffected} tone="rose" />
+            </dl>
+            <ImpactLegend className="mt-3 px-1" review />
+          </>
+        ) : impactActive ? (
           <>
             <div
               className="mt-2 grid grid-cols-3 gap-1 rounded-xl border border-border bg-panel p-1"
@@ -141,6 +177,20 @@ export function WorkspaceSidebar({
         <SkippedFiles projectId={projectId} />
       </div>
     </aside>
+  )
+}
+
+function ReviewStat({ label, value, tone }: { label: string; value?: number; tone?: 'rose' }) {
+  const emphasise = tone === 'rose' && (value ?? 0) > 0
+  return (
+    <div className="rounded-lg border border-border bg-panel px-3 py-2">
+      <dd
+        className={`font-mono text-lg font-semibold tabular-nums ${emphasise ? 'text-rose-300' : 'text-foreground'}`}
+      >
+        {value ?? 0}
+      </dd>
+      <dt className="text-[9px] font-bold uppercase tracking-[0.12em] text-dim">{label}</dt>
+    </div>
   )
 }
 
