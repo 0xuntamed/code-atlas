@@ -326,6 +326,87 @@ func TestImpactMapFromModule(t *testing.T) {
 	}
 }
 
+func TestEntitiesInRanges(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.CreateProject(ctx,
+		model.Project{ID: "p1", Name: "demo", SourceType: model.SourceLocal, RootPath: t.TempDir()},
+		model.AnalysisRun{ID: "run1", ProjectID: "p1"}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	files := []model.FileRecord{
+		{ID: "f1", ProjectID: "p1", RunID: "run1", Path: "src/orders.ts", Language: "typescript", Classification: "source"},
+	}
+	fn := func(id, name string, start, end int) model.Entity {
+		return model.Entity{ID: id, ProjectID: "p1", RunID: "run1", FileID: "f1", Kind: "function",
+			Name: name, QualifiedName: "src/orders.ts::" + name, Language: "typescript",
+			Range: model.Range{StartLine: start, EndLine: end}}
+	}
+	entities := []model.Entity{
+		fn("fetchOrders", "fetchOrders", 10, 20),
+		fn("helper", "helper", 30, 40),
+		// The file entity has no real range and must never match a positive range.
+		{ID: "fe", ProjectID: "p1", RunID: "run1", FileID: "f1", Kind: "file", Name: "orders.ts", QualifiedName: "src/orders.ts"},
+	}
+	if err := s.ReplaceRunData(ctx, "run1", files, entities, nil); err != nil {
+		t.Fatalf("replace run data: %v", err)
+	}
+	if err := s.PromoteRun(ctx, "run1", "p1"); err != nil {
+		t.Fatalf("promote run: %v", err)
+	}
+
+	// A change at lines 12–14 overlaps only fetchOrders.
+	ids, err := s.EntitiesInRanges(ctx, "p1", "src/orders.ts", [][2]int{{12, 14}})
+	if err != nil {
+		t.Fatalf("entities in ranges: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "fetchOrders" {
+		t.Errorf("got %v, want [fetchOrders]", ids)
+	}
+
+	// A change spanning 18–32 overlaps both functions (never the file entity).
+	ids, err = s.EntitiesInRanges(ctx, "p1", "src/orders.ts", [][2]int{{18, 32}})
+	if err != nil {
+		t.Fatalf("entities in ranges: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Errorf("got %v, want both functions", ids)
+	}
+
+	// A change above any symbol (imports) matches nothing → callers fall back to the file entity.
+	ids, err = s.EntitiesInRanges(ctx, "p1", "src/orders.ts", [][2]int{{1, 3}})
+	if err != nil {
+		t.Fatalf("entities in ranges: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("got %v, want none", ids)
+	}
+	fileID, err := s.FileEntityID(ctx, "p1", "src/orders.ts")
+	if err != nil || fileID != "fe" {
+		t.Errorf("file entity id = %q, err = %v, want fe", fileID, err)
+	}
+}
+
+func TestChangeImpact(t *testing.T) {
+	s := newTestStore(t)
+	seedImpactGraph(t, s)
+
+	// Pretend the diff touched listUsers. Its change ripple: callers break, callees are relied on.
+	graph, err := s.ChangeImpact(context.Background(), "p1", []string{"listUsers"}, 6, 200)
+	if err != nil {
+		t.Fatalf("change impact: %v", err)
+	}
+	if got := directionOf(graph, "listUsers"); got != "changed" {
+		t.Errorf("listUsers direction = %q, want changed", got)
+	}
+	if got := directionOf(graph, "handleUsers"); got != "dependent" {
+		t.Errorf("handleUsers direction = %q, want dependent", got)
+	}
+	if got := directionOf(graph, "validate"); got != "dependency" {
+		t.Errorf("validate direction = %q, want dependency", got)
+	}
+}
+
 func directionOf(g model.Graph, id string) string {
 	for _, n := range g.Nodes {
 		if n.ID == id {

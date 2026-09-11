@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -267,11 +269,28 @@ func (s *Store) ImpactMap(ctx context.Context, projectID, rootID string, depth, 
 	if err != nil {
 		return model.Graph{}, err
 	}
-	depth, limit = clampDepth(depth), clampNodes(limit)
-
 	seeds, err := s.impactSeeds(ctx, projectID, root)
 	if err != nil {
 		return model.Graph{}, err
+	}
+	return s.impactFrom(ctx, projectID, seeds, "root", rootID, depth, limit)
+}
+
+// ChangeImpact is the blast radius of a set of already-resolved changed entities
+// (e.g. the symbols a working-tree diff touched). Seeds are tagged "changed";
+// dependents and dependencies are tagged as for any other impact map.
+func (s *Store) ChangeImpact(ctx context.Context, projectID string, seeds []string, depth, limit int) (model.Graph, error) {
+	return s.impactFrom(ctx, projectID, seeds, "changed", "", depth, limit)
+}
+
+// impactFrom is the shared engine behind ImpactMap and ChangeImpact: walk
+// upstream (dependents) and downstream (dependencies) from a seed set, merge, and
+// tag every node's Direction. Seed nodes take seedTag; others become dependent /
+// dependency / both.
+func (s *Store) impactFrom(ctx context.Context, projectID string, seeds []string, seedTag, rootID string, depth, limit int) (model.Graph, error) {
+	depth, limit = clampDepth(depth), clampNodes(limit)
+	if len(seeds) == 0 {
+		return model.Graph{}, ErrNotFound
 	}
 	seedSet := make(map[string]bool, len(seeds))
 	for _, id := range seeds {
@@ -291,7 +310,7 @@ func (s *Store) ImpactMap(ctx context.Context, projectID, rootID string, depth, 
 	order := make([]string, 0, len(dependents)+len(dependencies))
 	add := func(entity model.Entity, direction string) {
 		if existing, ok := byID[entity.ID]; ok {
-			if existing.Direction != "root" && direction != "root" && existing.Direction != direction {
+			if existing.Direction != seedTag && existing.Direction != direction {
 				existing.Direction = "both"
 			}
 			if entity.Distance < existing.Distance {
@@ -302,7 +321,7 @@ func (s *Store) ImpactMap(ctx context.Context, projectID, rootID string, depth, 
 		node := entity
 		node.Direction = direction
 		if seedSet[node.ID] {
-			node.Direction = "root"
+			node.Direction = seedTag
 		}
 		byID[node.ID] = &node
 		order = append(order, node.ID)
@@ -328,6 +347,46 @@ func (s *Store) ImpactMap(ctx context.Context, projectID, rootID string, depth, 
 	}
 	edges, err := s.edgesForNodes(ctx, projectID, nodes, impactEdgeKinds)
 	return model.Graph{Nodes: nodes, Edges: edges, RootID: rootID, Truncated: truncated, Limit: limit, MaxDepth: depth}, err
+}
+
+// EntitiesInRanges returns the ids of entities in `path` whose source range
+// overlaps any of the given 1-based inclusive [start,end] line ranges. Structural
+// entities with no real range (module/file) never match a positive range.
+func (s *Store) EntitiesInRanges(ctx context.Context, projectID, path string, ranges [][2]int) ([]string, error) {
+	if len(ranges) == 0 {
+		return nil, nil
+	}
+	conditions := make([]string, 0, len(ranges))
+	args := []any{projectID, path}
+	for _, r := range ranges {
+		conditions = append(conditions, "(e.start_line <= ? AND e.end_line >= ?)")
+		args = append(args, r[1], r[0]) // overlap: entity.start <= range.end AND entity.end >= range.start
+	}
+	query := fmt.Sprintf(`
+		SELECT DISTINCT e.id
+		FROM entities e
+		JOIN projects p ON p.active_run_id = e.run_id
+		JOIN files f ON f.id = e.file_id
+		WHERE e.project_id = ? AND f.path = ? AND (%s)`,
+		strings.Join(conditions, " OR "))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows)
+}
+
+// FileEntityID returns the id of the file entity for a repo-relative path, or ""
+// if the current graph has no such file (e.g. an ignored or newly deleted file).
+func (s *Store) FileEntityID(ctx context.Context, projectID, path string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT e.id FROM entities e JOIN projects p ON p.active_run_id = e.run_id
+		WHERE e.project_id = ? AND e.kind = 'file' AND e.qualified_name = ?`, projectID, path).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 // impactSeeds expands a root entity into the set of symbols whose change is
