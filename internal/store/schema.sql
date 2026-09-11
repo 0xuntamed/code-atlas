@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     stage TEXT NOT NULL DEFAULT 'queued',
     completed INTEGER NOT NULL DEFAULT 0,
     total INTEGER NOT NULL DEFAULT 0,
+    entities INTEGER NOT NULL DEFAULT 0,
+    relationships INTEGER NOT NULL DEFAULT 0,
     message TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
     lease_until INTEGER,

@@ -12,6 +12,8 @@ export interface AnalysisRun {
   stage: string
   completed: number
   total: number
+  entities?: number
+  relationships?: number
   message?: string
   errorMessage?: string
   startedAt?: string

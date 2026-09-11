@@ -60,7 +60,7 @@ func (s *Service) analyze(ctx context.Context, runID, projectID string) (finalEr
 			_ = s.store.FailRun(context.Background(), runID, projectID, safe)
 		}
 	}()
-	_ = s.store.UpdateRun(ctx, runID, "acquiring", 0, 0, "Preparing repository")
+	_ = s.store.UpdateRun(ctx, runID, "acquiring", 0, 0, 0, 0, "Preparing repository")
 	commit, err := repository.Acquire(ctx, project)
 	if err != nil {
 		return err
@@ -68,7 +68,7 @@ func (s *Service) analyze(ctx context.Context, runID, projectID string) (finalEr
 	if commit != "" {
 		_ = s.store.UpdateProjectCommit(ctx, projectID, commit)
 	}
-	_ = s.store.UpdateRun(ctx, runID, "discovering", 0, 0, "Inventorying local files")
+	_ = s.store.UpdateRun(ctx, runID, "discovering", 0, 0, 0, 0, "Inventorying local files")
 	discovered, err := repository.Discover(ctx, projectID, runID, project.RootPath)
 	if err != nil {
 		return err
@@ -82,14 +82,15 @@ func (s *Service) analyze(ctx context.Context, runID, projectID string) (finalEr
 	if sourceCount > 10000 {
 		return fmt.Errorf("repository has %d relevant source files; the MVP limit is 10000", sourceCount)
 	}
-	_ = s.store.UpdateRun(ctx, runID, "parsing", 0, sourceCount, fmt.Sprintf("Parsing %d source files", sourceCount))
+	_ = s.store.UpdateRun(ctx, runID, "parsing", 0, sourceCount, 0, 0, fmt.Sprintf("Parsing %d source files", sourceCount))
 	parsed, err := s.parseFiles(ctx, runID, discovered, sourceCount)
 	if err != nil {
 		return err
 	}
-	_ = s.store.UpdateRun(ctx, runID, "resolving", sourceCount, sourceCount, "Resolving symbols and relationships")
+	entitiesScanned, edgesScanned := seedCounts(parsed)
+	_ = s.store.UpdateRun(ctx, runID, "resolving", sourceCount, sourceCount, entitiesScanned, edgesScanned, "Resolving symbols and relationships")
 	graph := buildGraph(projectID, runID, discovered, parsed)
-	_ = s.store.UpdateRun(ctx, runID, "persisting", sourceCount, sourceCount, "Persisting derived metadata")
+	_ = s.store.UpdateRun(ctx, runID, "persisting", sourceCount, sourceCount, len(graph.Entities), len(graph.Relationships), "Persisting derived metadata")
 	if err := s.store.ReplaceRunData(ctx, runID, graph.Files, graph.Entities, graph.Relationships); err != nil {
 		return err
 	}
@@ -165,15 +166,20 @@ func (s *Service) parseFiles(ctx context.Context, runID string, discovered []rep
 	}()
 	results := make([]parserpkg.ParseResult, total)
 	completed := 0
+	entitiesScanned := 0
+	edgesScanned := 0
 	lastUpdate := time.Now()
 	for outcome := range outcomes {
 		if outcome.err != nil {
 			return nil, outcome.err
 		}
 		results[outcome.index] = outcome.result
+		entitiesScanned += len(outcome.result.Entities)
+		edgesScanned += len(outcome.result.Imports) + len(outcome.result.References)
 		completed++
 		if completed == total || time.Since(lastUpdate) > 500*time.Millisecond {
-			_ = s.store.UpdateRun(ctx, runID, "parsing", completed, total, fmt.Sprintf("Parsed %d of %d source files", completed, total))
+			_ = s.store.UpdateRun(ctx, runID, "parsing", completed, total, entitiesScanned, edgesScanned,
+				fmt.Sprintf("Scanned %d of %d source files", completed, total))
 			lastUpdate = time.Now()
 		}
 	}
@@ -181,6 +187,16 @@ func (s *Service) parseFiles(ctx context.Context, runID string, discovered []rep
 		return nil, err
 	}
 	return results, nil
+}
+
+// seedCounts totals the raw entity and edge seeds found across all parsed files
+// (pre-resolution) — the "scanned" figures shown during analysis.
+func seedCounts(parsed []parserpkg.ParseResult) (entities, edges int) {
+	for _, result := range parsed {
+		entities += len(result.Entities)
+		edges += len(result.Imports) + len(result.References)
+	}
+	return entities, edges
 }
 
 func sanitizeError(err error, root string) string {

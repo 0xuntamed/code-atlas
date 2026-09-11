@@ -50,6 +50,8 @@ type AnalysisRun struct {
 	Stage        string     `json:"stage"`
 	Completed    int        `json:"completed"`
 	Total        int        `json:"total"`
+	Entities     int        `json:"entities"`
+	Relationships int       `json:"relationships"`
 	Message      string     `json:"message,omitempty"`
 	ErrorMessage string     `json:"errorMessage,omitempty"`
 	StartedAt    *time.Time `json:"startedAt,omitempty"`

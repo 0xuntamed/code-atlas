@@ -25,6 +25,11 @@ export function AnalysisProgress({ run }: { run?: AnalysisRun }) {
           <b className="ml-auto font-mono text-sm text-muted">{percent}%</b>
         </div>
 
+        <div className="mt-6 grid grid-cols-2 gap-3">
+          <ScanStat label="entities scanned" value={run?.entities} />
+          <ScanStat label="edges scanned" value={run?.relationships} />
+        </div>
+
         <div
           aria-label={`Analysis ${percent}% complete`}
           aria-valuemax={100}
@@ -94,6 +99,19 @@ export function AnalysisFailure({
         </Button>
       </section>
     </main>
+  )
+}
+
+function ScanStat({ label, value }: { label: string; value?: number }) {
+  return (
+    <div className="rounded-xl border border-border bg-canvas-raised/60 px-4 py-3">
+      <strong className="block font-mono text-2xl font-semibold tabular-nums text-foreground">
+        {(value ?? 0).toLocaleString()}
+      </strong>
+      <small className="mt-0.5 block text-[10px] font-bold uppercase tracking-[0.14em] text-dim">
+        {label}
+      </small>
+    </div>
   )
 }
 
