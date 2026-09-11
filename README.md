@@ -1,136 +1,229 @@
 # CodeAtlas
 
-CodeAtlas is a local-first code intelligence graph for JavaScript, TypeScript, Go, and Python repositories. It maps symbols, imports, calls, web routes, execution flow, and upstream/downstream impact without storing source code in its database. It ships as a single self-contained binary: metadata lives in an embedded SQLite database (no external database process, no Docker), and the Go server serves the production React interface as embedded static assets.
+**See your codebase as a map — and the blast radius of any change.**
 
-## Privacy boundary
+CodeAtlas parses a JavaScript, TypeScript, Go, or Python repository into a graph of files,
+functions, imports, calls, and web routes, then lets you **click any node to light up what a
+change to it would affect** — everything that depends on it, and everything it depends on.
 
-- The Go analyzer reads source from the registered repository and discards each source buffer after parsing.
-- The embedded SQLite database stores file metadata, hashes, source ranges, symbols, relationships, and analysis status only.
-- Source evidence is read from disk on demand and rejected if its hash changed after analysis.
-- The server binds to loopback and rejects non-loopback Host and Origin values.
-- Git credentials are never accepted in URLs or stored; managed clones use the local credential helper or SSH agent.
-- No AI provider, analytics service, external font, or telemetry endpoint is used.
+It runs entirely on your machine, stores **only structural metadata** (never your source),
+uses **no AI**, and ships as **one self-contained binary**: metadata lives in an embedded
+SQLite database (no Docker, no external database), and the Go server serves the built React UI
+as embedded assets.
+
+- 🗺️ **Whole-repo map** — modules, files, functions, routes, and how they connect.
+- 💥 **Blast radius** — select a file, module, or function; dependents (what breaks) turn
+  **rose**, dependencies (what it relies on) turn **sky**, the rest dims.
+- 🔒 **Local-first & private** — loopback only; source is read, parsed, and discarded.
+- 📦 **Single binary** — download (or build) once, point it at a folder, open the page.
+
+---
 
 ## Requirements
 
-- Go 1.26+
-- Node.js 22.12+ (or 20.19+) and npm — only to build the frontend bundle
-- Git
-- A C toolchain for production Tree-sitter builds. When CGO is unavailable, CodeAtlas compiles a conservative structural parser fallback so local development remains functional. (The SQLite driver is pure Go and needs no C toolchain.)
+| Tool | Version | Needed for |
+| --- | --- | --- |
+| **Go** | 1.26+ | building / running the server |
+| **Node.js + npm** | 22.12+ (or 20.19+) | building the frontend bundle once |
+| **Git** | any recent | analyzing Git-URL repositories (not needed for local folders) |
+| **C toolchain** | optional | full Tree-sitter parsing (see [Parsing modes](#parsing-modes)) |
 
-No Docker and no external database are required — metadata is stored in a local SQLite file.
+No Docker, no database server. The SQLite driver is pure Go.
 
-## Run locally
+---
 
-```powershell
+## Quick start
+
+From the repository root:
+
+```bash
+# 1. Build the frontend once (this writes internal/webui/dist, which the binary embeds)
 cd web
 npm install
 npm run build
 cd ..
+
+# 2. Run the server
 go run ./cmd/codeatlas serve
 ```
 
-Open `http://127.0.0.1:7331` and paste an absolute local repository path or an HTTPS/SSH Git URL. You can also point CodeAtlas at a repository directly on startup, and it registers on first launch:
+Then open **http://127.0.0.1:7331** and add a repository (see below).
 
-```powershell
+> **No C compiler?** Build the parser's regex fallback instead — same command, one env var:
+> ```bash
+> CGO_ENABLED=0 go run ./cmd/codeatlas serve
+> ```
+> See [Parsing modes](#parsing-modes) for the trade-off.
+
+### Build a standalone binary
+
+```bash
+cd web && npm install && npm run build && cd ..
+go build -o codeatlas ./cmd/codeatlas      # add CGO_ENABLED=0 for the toolchain-free build
+./codeatlas serve
+```
+
+---
+
+## Adding a repository
+
+Three ways, all equivalent:
+
+**A. In the browser** — open http://127.0.0.1:7331 and paste either:
+- an **absolute local folder path** (recommended — reads in place, nothing is copied), or
+- an **HTTPS/SSH Git URL** (CodeAtlas makes a shallow managed clone).
+
+**B. On startup** — point the server at a repo; it registers on first launch:
+```bash
 go run ./cmd/codeatlas serve C:\absolute\path\to\repo
 ```
 
-The header keeps repository lifecycle actions available after onboarding: add another repository, switch projects, reanalyze, remove derived metadata, or explicitly stop the local CodeAtlas process.
+**C. From another terminal** while the server runs:
+```bash
+go run ./cmd/codeatlas add C:\absolute\path\to\repo
+```
 
-The SQLite database is created under the data directory (`<data-dir>/codeatlas.db`) on first run.
+Analysis starts immediately and streams live progress. When it finishes, the map appears.
 
-During frontend development, keep the Go server running and start Vite in a second terminal. Vite defaults to `127.0.0.1:5173` and proxies `/api` to the Go server:
+---
 
-```powershell
-# Terminal 1
+## Using CodeAtlas
+
+1. **Read the shape.** The overview shows modules sized by what they hold, wired by the calls
+   and imports between them.
+2. **Drill in.** Double-click a **module** to see its files; double-click a **file** to see the
+   functions and routes it declares. The breadcrumb (top-left) walks you back out.
+3. **See a blast radius.** Click **any** node. Its ripple lights up on the same map:
+   - **the node itself** — the change epicenter,
+   - **rose = breaks** — things that depend on it (upstream),
+   - **sky = relies on** — things it depends on (downstream),
+   - everything unrelated dims.
+4. **Focus the ripple.** Use the **Both / Breaks / Relies on** filter in the sidebar to isolate
+   one side.
+5. **Expand the detail.** Affected files group their symbols into one “N affected” node — click
+   it to reveal the exact functions inside, or **Collapse** to fold them back.
+6. **Confirm with the source.** Open a node's inspector to read the real, **hash-verified** code
+   without leaving the map.
+
+Two signal filters keep the view honest: **Include tests** and **Reference noise**
+(external/unresolved symbols) are off by default.
+
+The header keeps repository actions handy: add another repo, switch projects, reanalyze, remove
+derived metadata, or stop the local server.
+
+---
+
+## Configuration
+
+Flags (or environment variables) accepted by `serve`:
+
+| Flag | Env var | Default |
+| --- | --- | --- |
+| `--listen` | `CODEATLAS_LISTEN_ADDR` | `127.0.0.1:7331` |
+| `--data-dir` | `CODEATLAS_DATA_DIR` | OS user-cache dir under `CodeAtlas` |
+| `--database` | `CODEATLAS_DATABASE_PATH` | `<data-dir>/codeatlas.db` |
+
+The data directory holds the SQLite file and any managed Git clones. It's created on first run.
+
+---
+
+## Parsing modes
+
+CodeAtlas has two parsers behind a build tag:
+
+- **Tree-sitter (default, needs CGO + a C toolchain)** — accurate syntax-tree parsing of
+  JS/TS/Go/Python. This is what a normal `go build` / `go run` uses.
+- **Structural fallback (`CGO_ENABLED=0`)** — a conservative regex line-scanner that produces
+  the same kind of graph at lower fidelity, with **no C toolchain required**. Ideal for quick
+  local runs and toolchain-free cross-compiles.
+
+If a plain build fails with a C-compiler error, either install a C toolchain (e.g. MSYS2/MinGW
+on Windows) or prefix the command with `CGO_ENABLED=0`.
+
+---
+
+## Troubleshooting
+
+- **`fatal: cannot write keep file` when adding a Git URL (Windows).** The managed clone path
+  crossed Windows' 260-character limit. Use a **short** `--data-dir` (e.g. `C:\atlas`), or add
+  the repo as a **local folder path** instead of a Git URL (no clone needed).
+- **“Analysis stopped / kept your last valid graph.”** A run failed; the previous graph is
+  preserved by design. Check the server log for the reason, fix it, and reanalyze.
+- **C-compiler error on build.** See [Parsing modes](#parsing-modes) — use `CGO_ENABLED=0`.
+- **Repository too large.** The MVP caps analysis at 10,000 source files.
+
+---
+
+## Development
+
+Run the Go server and Vite side by side; Vite proxies `/api` to the Go server:
+
+```bash
+# Terminal 1 — API + analyzer
 go run ./cmd/codeatlas serve
 
-# Terminal 2
+# Terminal 2 — frontend with hot reload at http://127.0.0.1:5173
 cd web
 npm run dev
 ```
 
-Register a folder from the terminal with:
+`npm run build` writes the production frontend to `internal/webui/dist`, which
+`internal/webui/webui.go` embeds — **rebuild it before compiling the binary** after any
+frontend change.
 
-```powershell
-go run ./cmd/codeatlas add C:\absolute\path\to\repo
-```
+### Tests
 
-Configuration:
-
-| Variable                  | Default                                    |
-| ------------------------- | ------------------------------------------ |
-| `CODEATLAS_DATABASE_PATH` | `<data-dir>/codeatlas.db`                  |
-| `CODEATLAS_LISTEN_ADDR`   | `127.0.0.1:7331`                           |
-| `CODEATLAS_DATA_DIR`      | OS user cache directory under `CodeAtlas`  |
-
-## Frontend architecture
-
-The frontend is a React 19 and TypeScript application built with Vite 7 and Tailwind CSS v4 through the official Vite integration.
-
-- `web/src/styles/app.css` defines the CSS-first semantic token contract, component radii, graph colors, animations, and reduced-motion behavior.
-- Reusable buttons, dialogs, icons, and brand elements live in `web/src/components` and consume static Tailwind variant maps.
-- TanStack Query owns API requests, cancellation, polling, retries, and cache invalidation. Offline and mutation failures remain visible instead of falling through to empty states.
-- Zustand stores only cross-workspace interaction state such as the selected project, graph mode, selected entity, and explicit signal filters.
-- React Flow renders the bounded graph, while ELK layout runs outside the main thread in a worker and falls back to a deterministic grid if layout exceeds its time budget.
-- Monaco and its local language support are lazy-loaded only when verified source evidence is requested.
-
-`npm run build` writes the production frontend directly to `internal/webui/dist`. That directory is embedded by `internal/webui/webui.go`; rebuild it before compiling or distributing the Go executable after frontend changes.
-
-## Analysis model
-
-The analyzer inventories the repository, applies hard privacy exclusions, `.gitignore`, and `.codeatlasignore`, parses declarations and imports, resolves cross-file relationships, detects supported route patterns, and atomically promotes the completed graph. Failed or partial runs never replace the last valid graph. File hashes key a process-local metadata-only parse cache so unchanged files are reused during later analyses without retaining source or ASTs.
-
-Supported route detectors:
-
-- Express and Next.js route handlers for JavaScript/TypeScript
-- `net/http` and Gin for Go
-- FastAPI and Flask for Python
-
-The skipped-file view explains every visited exclusion. Entire ignored directories are recorded once and pruned without enumerating their descendants. Unsupported files, generated output, dependencies, binaries, ignored paths, and privacy exclusions remain inventory metadata and never become graph nodes.
-
-Tests are still analyzed because they are useful impact dependents, but test files, test symbols, and test-only modules are hidden from the canvas by default. They can be enabled with the **Include tests** filter.
-
-## Graph experience and render budgets
-
-The architecture explorer uses progressive disclosure instead of flattening every symbol into one canvas:
-
-1. The overview aggregates source files, symbols, routes, and cross-module relationships into module cards.
-2. Opening a module loads only its immediate file neighborhood.
-3. Opening a file loads only its declarations and direct dependencies.
-4. Flow and impact views start from a selected symbol and request at most 120 nodes by default.
-
-The default canvas keeps only supported architectural entities and hides external or unresolved symbols behind the **Reference noise** filter. Edges are retained only when both endpoints remain visible, preventing hidden or unimportant records from leaving orphaned relationships.
-
-React Flow mounts only visible cards, dense views suppress persistent edge labels and animation, and ELK layout runs in a worker with a bounded fallback layout. Graph layout identity includes edge topology so same-size graph updates cannot reuse stale positions. The skipped-file list uses `content-visibility` and a bounded API result. Monaco and the four supported syntax tokenizers are bundled locally and lazy-loaded only when source evidence is opened.
-
-## Code layout
-
-- `internal/api`: loopback security, project lifecycle, analysis events, graph handlers, source evidence, and process shutdown.
-- `internal/analyzer`: explicit inventory, structural entity, declaration, relationship, and resolution phases.
-- `internal/parser`: Tree-sitter adapters plus a no-CGO development fallback.
-- `internal/repository`: safe Git acquisition, discovery, hashing, and ignore rules.
-- `internal/store`: embedded SQLite migrations, durable jobs, atomic promotion, search, and graph traversal.
-- `internal/webui`: generated frontend assets and the `go:embed` HTTP handler.
-- `web/src/components`: accessible UI primitives and the in-repository SVG icon system.
-- `web/src/features`: project, analysis, graph, search, file inventory, source, and workspace UI boundaries.
-- `web/src/lib`: graph filtering, graph-layout identity, and shared utilities.
-- `web/src/styles/app.css`: Tailwind v4 theme tokens, base styles, custom utilities, and React Flow integration styles.
-
-## API
-
-The local JSON API is rooted at `/api/v1`. Key endpoints include project creation and reanalysis, SSE progress, skipped-file inventory, symbol search, architecture graph, execution flow, impact traversal, entity details, live source evidence, and explicit local shutdown. Architecture requests accept a `scope` entity ID for drill-down. Graph responses retain a 500-node hard safety cap and traversal depth is capped at 12; the UI uses smaller 80/120-node budgets.
-
-## Tests
-
-```powershell
-go test ./cmd/... ./internal/...
+```bash
+go test ./cmd/... ./internal/...       # Go: parser, analyzer, store (SQLite), API
 go vet ./cmd/... ./internal/...
-cd web
-npm run check
-npm run build
-npm audit
+cd web && npm run check                 # tsc + ESLint + Vitest + Prettier
 ```
 
-`npm run check` runs strict TypeScript, ESLint with React Hooks rules, Vitest, and Prettier verification. Frontend tests cover workspace-state resets, explicit filter persistence, low-signal graph filtering, test-only modules, edge cleanup, and topology-sensitive layout keys. The Go suite includes parser fixtures for all supported languages, privacy/ignore tests, API security and source-window tests, graph resolution tests, test-only module classification, and a cross-platform CGO CI build that exercises the official Tree-sitter grammars.
+---
+
+## Privacy boundary
+
+- Source buffers are read, parsed, and **immediately discarded**. The database stores only
+  paths, hashes, source ranges, symbols, relationships, and analysis status.
+- Source evidence is re-read from disk on demand and **rejected if its hash changed** since
+  analysis.
+- The server binds to **loopback** and rejects non-loopback `Host`/`Origin`.
+- Git credentials are never accepted in URLs or stored; managed clones defer to the local
+  credential helper / SSH agent.
+- **No AI provider, analytics, external fonts, or telemetry** — the CSP forbids off-origin
+  requests.
+
+---
+
+## How it works (short version)
+
+**Analyze:** discover & classify files → parse with Tree-sitter → build a graph of `entities`
+(module/file/function/route…) and `relationships` (contains/defines/imports/calls/
+handles_route) → store in SQLite and promote the finished run **atomically** (a failed run
+never replaces the last good graph).
+
+**Explore:** the React app reads the graph over the loopback API and draws it with React Flow;
+selecting a node requests its **impact map** — a bounded, bidirectional graph walk that tags
+each reached node as a dependent or dependency — which the UI paints over the base map.
+
+Supported route detectors: **Express & Next.js** (JS/TS), **net/http & Gin** (Go),
+**FastAPI & Flask** (Python).
+
+### Deeper docs
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture & data-flow tour.
+- [`docs/CODEBASE.md`](docs/CODEBASE.md) — function-level reference: every module and the full
+  flow from adding a repo to the blast radius.
+
+### Project layout
+
+```
+cmd/codeatlas     CLI + server entry point
+internal/api      loopback security, project lifecycle, graph/impact handlers, SSE, source
+internal/analyzer job loop + the analysis pipeline (discover → parse → build → persist)
+internal/parser   Tree-sitter adapters (+ no-CGO fallback)
+internal/repository  Git acquisition, filesystem discovery, hashing, ignore rules
+internal/store    embedded SQLite: migrations, durable jobs, atomic promotion, graph queries
+internal/webui    go:embed of the built SPA
+web/              React 19 + TypeScript frontend (built into internal/webui/dist)
+```
