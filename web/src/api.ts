@@ -1,4 +1,5 @@
 import type {
+  ChangesResponse,
   Entity,
   FileRecord,
   GraphResponse,
@@ -85,6 +86,12 @@ export const api = {
   impactMap: (projectId: string, entityId: string, signal?: AbortSignal) =>
     request<GraphResponse>(
       `/projects/${encodeURIComponent(projectId)}/impact-map/${encodeURIComponent(entityId)}?depth=4&limit=160`,
+      undefined,
+      signal,
+    ),
+  changes: (projectId: string, signal?: AbortSignal) =>
+    request<ChangesResponse>(
+      `/projects/${encodeURIComponent(projectId)}/changes`,
       undefined,
       signal,
     ),

@@ -10,6 +10,7 @@ export type IconName =
   | 'chevron-right'
   | 'close'
   | 'code'
+  | 'diff'
   | 'external'
   | 'file'
   | 'filter'
@@ -74,6 +75,13 @@ function iconContent(name: IconName) {
       return <path {...shared} d="M6 6l12 12M18 6 6 18" />
     case 'code':
       return <path {...shared} d="m8 9-3 3 3 3m8-6 3 3-3 3m-2-9-4 12" />
+    case 'diff':
+      return (
+        <>
+          <path {...shared} d="M6 5v6M3 8h6" />
+          <path {...shared} d="M15 16h6" />
+        </>
+      )
     case 'external':
       return (
         <path

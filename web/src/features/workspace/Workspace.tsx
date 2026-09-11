@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api'
+import { Icon } from '../../components/Icon'
 import { useAtlasStore } from '../../store'
 import type { Entity, Project } from '../../types'
 import { AnalysisFailure, AnalysisProgress } from '../analysis/AnalysisProgress'
@@ -46,6 +47,8 @@ function ReadyWorkspace({ project }: { project: Project }) {
   const toggleTests = useAtlasStore((state) => state.toggleTests)
   const toggleReferences = useAtlasStore((state) => state.toggleReferences)
   const resetSelection = useAtlasStore((state) => state.resetSelection)
+  const reviewMode = useAtlasStore((state) => state.reviewMode)
+  const setReviewMode = useAtlasStore((state) => state.setReviewMode)
 
   // File-group expansion is ephemeral view state; a new selection resets it,
   // tracking the previous selection in state per React's "reset on change" pattern.
@@ -88,8 +91,11 @@ function ReadyWorkspace({ project }: { project: Project }) {
         onImpactFilterChange={setImpactFilter}
         onSelect={selectEntity}
         onToggleReferences={toggleReferences}
+        onToggleReview={() => setReviewMode(!reviewMode)}
         onToggleTests={toggleTests}
         projectId={project.id}
+        reviewMode={reviewMode}
+        reviewSummary={graph.reviewSummary}
         showReferences={showReferences}
         showTests={showTests}
       />
@@ -100,12 +106,15 @@ function ReadyWorkspace({ project }: { project: Project }) {
           hiddenTotal={graph.hiddenTotal}
           impactActive={graph.impactActive}
           onNavigate={navigateScope}
+          reviewMode={reviewMode}
           scopePath={scopePath}
           selectedName={graph.selectedEntity?.name}
         />
         <section className="relative min-h-0">
           {graph.isError ? (
             <GraphError />
+          ) : reviewMode && graph.reviewEmpty ? (
+            <ReviewEmpty />
           ) : (
             <GraphCanvas
               directionById={graph.directionById}
@@ -129,6 +138,22 @@ function ReadyWorkspace({ project }: { project: Project }) {
         onExplore={explore}
         projectId={project.id}
       />
+    </div>
+  )
+}
+
+function ReviewEmpty() {
+  return (
+    <div className="grid h-full place-items-center px-6 text-center">
+      <div className="max-w-sm">
+        <div className="mx-auto grid size-14 place-items-center rounded-2xl border border-amber-400/30 bg-amber-400/10 text-amber-300">
+          <Icon className="size-5" name="diff" />
+        </div>
+        <h3 className="mt-5 text-sm font-semibold text-foreground">No uncommitted changes</h3>
+        <p className="mt-2 text-xs leading-5 text-muted">
+          Edit a tracked file in this repository and its blast radius will appear here.
+        </p>
+      </div>
     </div>
   )
 }
