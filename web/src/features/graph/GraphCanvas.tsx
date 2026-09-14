@@ -13,6 +13,7 @@ const edgeTypes = { relationship: RelationshipEdge }
 // Edge stroke per blast-radius side (SVG needs real colors, not Tailwind classes).
 const directionStroke: Record<ImpactDirection, string> = {
   root: 'var(--ui-graph-edge)',
+  changed: '#fbbf24',
   dependent: '#fb7185',
   dependency: '#38bdf8',
   both: '#a78bfa',

@@ -1,7 +1,20 @@
 export type SourceType = 'local' | 'git'
 export type ProjectStatus = 'queued' | 'analyzing' | 'ready' | 'failed'
-// A node's role in a selected node's blast radius.
-export type ImpactDirection = 'root' | 'dependent' | 'dependency' | 'both'
+// A node's role in a selected node's blast radius. In change-review mode the
+// seed role is "changed" (an edited symbol) rather than "root".
+export type ImpactDirection = 'root' | 'changed' | 'dependent' | 'dependency' | 'both'
+
+export interface ChangesSummary {
+  filesChanged: number
+  symbolsChanged: number
+  routesAffected: number
+  testsAffected: number
+}
+
+export interface ChangesResponse {
+  graph: GraphResponse
+  summary: ChangesSummary
+}
 // Which side of the blast radius to show.
 export type ImpactFilter = 'both' | 'dependents' | 'dependencies'
 
@@ -12,6 +25,8 @@ export interface AnalysisRun {
   stage: string
   completed: number
   total: number
+  entities?: number
+  relationships?: number
   message?: string
   errorMessage?: string
   startedAt?: string

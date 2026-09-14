@@ -21,6 +21,7 @@ export type AtlasFlowNode = Node<
 // and what it relies on (dependencies).
 const directionClasses: Record<ImpactDirection, string> = {
   root: '!border-primary ring-2 ring-primary/45',
+  changed: '!border-amber-400 ring-2 ring-amber-400/50',
   dependent: '!border-rose-400 ring-2 ring-rose-400/40',
   dependency: '!border-sky-400 ring-2 ring-sky-400/40',
   both: '!border-violet-400 ring-2 ring-violet-400/40',

@@ -56,6 +56,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("apply database schema: %w", err)
 		}
 	}
+	// Additive columns for databases created before these were introduced.
+	// SQLite has no ADD COLUMN IF NOT EXISTS, so ignore the duplicate-column error.
+	for _, statement := range []string{
+		"ALTER TABLE analysis_runs ADD COLUMN entities INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE analysis_runs ADD COLUMN relationships INTEGER NOT NULL DEFAULT 0",
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("apply database schema: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -108,7 +118,7 @@ func scanRun(row scanner) (*model.AnalysisRun, error) {
 	var started, completed sql.NullInt64
 	var created int64
 	err := row.Scan(&run.ID, &run.ProjectID, &run.Status, &run.Stage, &run.Completed,
-		&run.Total, &run.Message, &run.ErrorMessage, &started, &completed, &created)
+		&run.Total, &run.Entities, &run.Relationships, &run.Message, &run.ErrorMessage, &started, &completed, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -121,7 +131,7 @@ func scanRun(row scanner) (*model.AnalysisRun, error) {
 	return &run, nil
 }
 
-const runColumns = `id, project_id, status, stage, completed, total, message, error_message, started_at, completed_at, created_at`
+const runColumns = `id, project_id, status, stage, completed, total, entities, relationships, message, error_message, started_at, completed_at, created_at`
 
 func (s *Store) LatestRun(ctx context.Context, projectID string) (*model.AnalysisRun, error) {
 	return scanRun(s.db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM analysis_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1`, projectID))
@@ -162,10 +172,10 @@ func (s *Store) ClaimRun(ctx context.Context) (*model.AnalysisRun, error) {
 	return run, nil
 }
 
-func (s *Store) UpdateRun(ctx context.Context, runID, stage string, completed, total int, message string) error {
+func (s *Store) UpdateRun(ctx context.Context, runID, stage string, completed, total, entities, relationships int, message string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE analysis_runs SET stage=?, completed=?, total=?, message=?, lease_until=? WHERE id=?`,
-		stage, completed, total, message, microsFromNow(leaseDuration), runID)
+		UPDATE analysis_runs SET stage=?, completed=?, total=?, entities=?, relationships=?, message=?, lease_until=? WHERE id=?`,
+		stage, completed, total, entities, relationships, message, microsFromNow(leaseDuration), runID)
 	return err
 }
 

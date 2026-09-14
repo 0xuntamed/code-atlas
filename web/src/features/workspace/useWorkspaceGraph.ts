@@ -3,18 +3,28 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api'
 import { filterGraph } from '../../lib/graph'
 import { useAtlasStore } from '../../store'
-import type { Entity, GraphResponse, ImpactDirection, ImpactFilter, Project } from '../../types'
+import type {
+  ChangesSummary,
+  Entity,
+  GraphResponse,
+  ImpactDirection,
+  ImpactFilter,
+  Project,
+} from '../../types'
 
 export interface WorkspaceGraph {
   displayGraph?: GraphResponse
   hiddenTotal: number
-  // Blast-radius role per node id (root / dependent / dependency / both).
+  // Blast-radius role per node id (root / changed / dependent / dependency / both).
   directionById: Map<string, ImpactDirection>
   // Edge ids that run between two nodes in the blast radius.
   impactEdgeIds: Set<string>
-  // True when a selection's blast radius is loaded and overlaid.
+  // True when a blast radius (a selection's or the working tree's changes) is shown.
   impactActive: boolean
   selectedEntity?: Entity
+  // Set only in review mode: the change summary, and whether the tree is clean.
+  reviewSummary?: ChangesSummary
+  reviewEmpty: boolean
   isError: boolean
   isLoading: boolean
 }
@@ -112,9 +122,18 @@ function rollupByFile(
 export function useWorkspaceGraph(project: Project, expandedFiles: Set<string>): WorkspaceGraph {
   const selectedEntityId = useAtlasStore((state) => state.selectedEntityId)
   const impactFilter = useAtlasStore((state) => state.impactFilter)
+  const reviewMode = useAtlasStore((state) => state.reviewMode)
   const scopePath = useAtlasStore((state) => state.scopePath)
   const showTests = useAtlasStore((state) => state.showTests)
   const showReferences = useAtlasStore((state) => state.showReferences)
+
+  // Review mode: the blast radius of the working tree's uncommitted changes.
+  const changesQuery = useQuery({
+    queryKey: ['changes', project.id, project.activeRunId],
+    queryFn: ({ signal }) => api.changes(project.id, signal),
+    enabled: reviewMode,
+    staleTime: 0,
+  })
 
   const scopeId = scopePath.at(-1)?.id ?? ''
   const baseQuery = useQuery({
@@ -137,6 +156,37 @@ export function useWorkspaceGraph(project: Project, expandedFiles: Set<string>):
   })
 
   return useMemo(() => {
+    // --- Review mode: show the working tree's change blast radius, ignoring selection.
+    if (reviewMode) {
+      const changes = changesQuery.data
+      const filtered = filterGraph(changes?.graph, { showTests, showReferences: true }, '')
+      const directionById = new Map<string, ImpactDirection>()
+      const impactEdgeIds = new Set<string>()
+      if (filtered.graph) {
+        for (const node of filtered.graph.nodes) {
+          if (node.direction) directionById.set(node.id, node.direction)
+        }
+        for (const edge of filtered.graph.edges) {
+          if (directionById.has(edge.source) && directionById.has(edge.target)) {
+            impactEdgeIds.add(edge.id)
+          }
+        }
+      }
+      const nodeCount = filtered.graph?.nodes.length ?? 0
+      return {
+        displayGraph: filtered.graph,
+        hiddenTotal: filtered.hiddenTotal,
+        directionById,
+        impactEdgeIds,
+        impactActive: nodeCount > 0,
+        selectedEntity,
+        reviewSummary: changes?.summary,
+        reviewEmpty: Boolean(changes) && nodeCount === 0,
+        isError: changesQuery.isError,
+        isLoading: changesQuery.isLoading,
+      }
+    }
+
     const base = baseQuery.data
     const impact = selectedEntityId ? impactQuery.data : undefined
     const directionById = new Map<string, ImpactDirection>()
@@ -199,6 +249,7 @@ export function useWorkspaceGraph(project: Project, expandedFiles: Set<string>):
       impactEdgeIds,
       impactActive,
       selectedEntity,
+      reviewEmpty: false,
       isError: baseQuery.isError,
       isLoading: baseQuery.isLoading,
     }
@@ -206,9 +257,13 @@ export function useWorkspaceGraph(project: Project, expandedFiles: Set<string>):
     baseQuery.data,
     baseQuery.isError,
     baseQuery.isLoading,
+    changesQuery.data,
+    changesQuery.isError,
+    changesQuery.isLoading,
     expandedFiles,
     impactQuery.data,
     impactFilter,
+    reviewMode,
     selectedEntity,
     selectedEntityId,
     showReferences,

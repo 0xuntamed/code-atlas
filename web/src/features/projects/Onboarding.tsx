@@ -77,7 +77,7 @@ export function Onboarding({ onAdd }: { onAdd: () => void }) {
               </div>
               <div className="flex items-center gap-2 border-t border-border pt-4 text-[10px] font-semibold uppercase tracking-[0.16em] text-dim">
                 <span className="size-1.5 animate-pulse-soft rounded-full bg-primary" />
-                PostgreSQL stores metadata, never source
+                Local SQLite stores metadata, never source
               </div>
             </div>
           </div>
