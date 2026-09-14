@@ -1,0 +1,14 @@
+# Normalize line endings: store everything as LF in git, check out with the
+# platform's native endings. Ends the CRLF/prettier noise on Windows checkouts.
+* text=auto eol=lf
+
+# Keep binaries untouched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.exe binary
+*.db binary

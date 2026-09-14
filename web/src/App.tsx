@@ -137,8 +137,8 @@ export default function App() {
         title="Stop CodeAtlas?"
       >
         <p>
-          This stops the local Go process. Project metadata remains in PostgreSQL for the next
-          launch.
+          This stops the local Go process. Project metadata remains in the local database for the
+          next launch.
         </p>
       </ConfirmDialog>
     </div>

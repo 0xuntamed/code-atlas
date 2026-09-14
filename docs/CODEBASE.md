@@ -498,5 +498,3 @@ cd web; npm run check                  # tsc + eslint + vitest + prettier
 - **Windows long paths.** Managed git clones live under `<data-dir>/repositories/<id>`; a very
   deep data dir can push `.git` pack paths past the 260-char limit (`fatal: cannot write keep
   file`). Use a short data dir, or add a local folder instead of a Git URL.
-- **Stale copy.** The shutdown dialog in `web/src/App.tsx` still says metadata "remains in
-  PostgreSQL" — a leftover string from before the SQLite migration; harmless, worth updating.

@@ -49,7 +49,7 @@ export function AddProjectDialog({
             Source stays on this machine
           </strong>
           <p className="mt-1 text-xs leading-5 text-muted">
-            Only derived graph metadata and file hashes are stored in PostgreSQL.
+            Only derived graph metadata and file hashes are stored, in a local SQLite file.
           </p>
         </div>
       </div>
