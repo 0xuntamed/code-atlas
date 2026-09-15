@@ -21,3 +21,6 @@ web/vite.config.d.ts
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Claude Code (local, per-machine)
+.claude/settings.local.json
