@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/codeatlas/codeatlas/internal/id"
 	"github.com/codeatlas/codeatlas/internal/model"
@@ -52,6 +54,7 @@ func Discover(ctx context.Context, projectID, runID, root string) ([]DiscoveredF
 	}
 	matcher := loadIgnoreMatcher(canonical)
 	result := make([]DiscoveredFile, 0, 512)
+	var tasks []ioTask
 	err = filepath.WalkDir(canonical, func(current string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("inspect repository entry: %w", walkErr)
@@ -103,30 +106,113 @@ func Discover(ctx context.Context, projectID, runID, root string) ([]DiscoveredF
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if binaryExtensions[ext] || looksBinary(current) {
+		if binaryExtensions[ext] {
 			record.IgnoreReason = "hard safety: binary file"
 			result = append(result, DiscoveredFile{Record: record, AbsolutePath: current})
 			return nil
 		}
 		if language, ok := sourceExtensions[ext]; ok {
+			// A source file needs its content hashed; that I/O is deferred to the
+			// parallel pass below (hashing every file serially dominates discovery).
 			record.Classification = "source"
 			record.Language = language
 			record.IsTest = isTestFile(rel)
-			hash, err := hashFile(current)
-			if err != nil {
-				return err
-			}
-			record.ContentHash = hash
-		} else if supportFiles[entry.Name()] {
+			result = append(result, DiscoveredFile{Record: record, AbsolutePath: current})
+			tasks = append(tasks, ioTask{index: len(result) - 1, kind: taskHash})
+			return nil
+		}
+		if supportFiles[entry.Name()] {
 			record.Classification = "support"
 			record.IgnoreReason = "read transiently for module resolution"
-		} else {
-			record.IgnoreReason = "unsupported file type"
+			result = append(result, DiscoveredFile{Record: record, AbsolutePath: current})
+			return nil
 		}
+		// Unknown type: sniff for binary content (also deferred I/O). Defaults to
+		// "unsupported file type" unless the sniff finds it binary.
+		record.IgnoreReason = "unsupported file type"
 		result = append(result, DiscoveredFile{Record: record, AbsolutePath: current})
+		tasks = append(tasks, ioTask{index: len(result) - 1, kind: taskSniff})
 		return nil
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	if err := runIOTasks(ctx, result, tasks); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+const (
+	taskHash  = 1 // hash a source file's contents
+	taskSniff = 2 // sniff an unknown file for binary content
+)
+
+type ioTask struct {
+	index int
+	kind  int
+}
+
+// runIOTasks performs discovery's per-file I/O (content hashing and binary
+// sniffing) across a worker pool. Each task writes a distinct result element,
+// so no locking is needed on the slice itself. This turns discovery from a
+// serial file-by-file read into a parallel one — the dominant cost on large
+// repositories, especially on Windows where each file open is expensive.
+func runIOTasks(ctx context.Context, result []DiscoveredFile, tasks []ioTask) error {
+	if len(tasks) == 0 {
+		return ctx.Err()
+	}
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan ioTask)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range jobs {
+				path := result[task.index].AbsolutePath
+				switch task.kind {
+				case taskHash:
+					hash, err := hashFile(path)
+					if err != nil {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = err
+						}
+						mu.Unlock()
+						continue
+					}
+					result[task.index].Record.ContentHash = hash
+				case taskSniff:
+					if looksBinary(path) {
+						result[task.index].Record.IgnoreReason = "hard safety: binary file"
+					}
+				}
+			}
+		}()
+	}
+feed:
+	for _, task := range tasks {
+		select {
+		case <-ctx.Done():
+			break feed
+		case jobs <- task:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 func hardExcluded(relative string, isDir bool, size int64) (bool, string) {

@@ -35,7 +35,7 @@ type Store struct {
 // Open opens (creating if necessary) the SQLite database at path. The bundled
 // driver is pure Go, so no external database process or C toolchain is needed.
 func Open(ctx context.Context, path string) (*Store, error) {
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)", path)
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(normal)&_pragma=foreign_keys(on)&_pragma=temp_store(memory)&_pragma=cache_size(-65536)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -271,6 +271,13 @@ func (s *Store) ReplaceRunData(ctx context.Context, runID string, files []model.
 		return err
 	}
 	defer tx.Rollback()
+	// Defer foreign-key enforcement to commit time. Otherwise every one of the
+	// (often hundreds of thousands of) relationship rows does live existence
+	// checks against entities/files as it inserts; deferring lets the whole set
+	// be validated once at COMMIT, which dominates persist time on large repos.
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
+		return err
+	}
 	// Delete children before parents so foreign keys stay satisfied.
 	for _, table := range []string{"relationships", "entities", "files"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE run_id=?`, runID); err != nil {
