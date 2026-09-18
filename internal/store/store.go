@@ -349,10 +349,44 @@ func (s *Store) PromoteRun(ctx context.Context, runID, projectID string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	cutoff := microsFromNow(-time.Minute)
-	_, _ = s.db.ExecContext(ctx, `
-		DELETE FROM analysis_runs WHERE project_id=? AND id<>? AND status='ready' AND created_at < ?`, projectID, runID, cutoff)
+	// Prune superseded runs. Once this run is promoted active, every other
+	// completed run for the project is stale; without this, each re-analysis
+	// leaves a full copy of the graph behind, bloating the file and slowing
+	// every project-scoped query. Delete each stale run's rows explicitly and
+	// index-friendly (by project_id+run_id) rather than via one cascading
+	// DELETE of the run row — that cascade can span hundreds of thousands of
+	// rows in a single statement, time out under WAL lock contention, and
+	// silently roll back, leaving the stale copy in place. In-flight runs
+	// (queued/analyzing) are left untouched. Runs in the background with its own
+	// context so a large cleanup never blocks analysis completion; best-effort,
+	// a failure only costs space, never correctness.
+	go s.pruneSupersededRuns(context.Background(), projectID, runID)
 	return nil
+}
+
+func (s *Store) pruneSupersededRuns(ctx context.Context, projectID, activeRunID string) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM analysis_runs WHERE project_id=? AND id<>? AND status IN ('ready','failed')`,
+		projectID, activeRunID)
+	if err != nil {
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	for _, id := range stale {
+		for _, table := range []string{"relationships", "entities", "files"} {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE project_id=? AND run_id=?`, projectID, id); err != nil {
+				return
+			}
+		}
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM analysis_runs WHERE id=?`, id)
+	}
 }
 
 func (s *Store) DeleteProject(ctx context.Context, id string) error {

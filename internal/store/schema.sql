@@ -97,3 +97,14 @@ CREATE INDEX IF NOT EXISTS relationships_source_idx
     ON relationships (project_id, run_id, source_entity_id, relationship_type);
 CREATE INDEX IF NOT EXISTS relationships_target_idx
     ON relationships (project_id, run_id, target_entity_id, relationship_type);
+-- The architecture overview groups symbols by their file within each module.
+-- Without an index on (run_id, file_id) that join full-scans the entire
+-- entities table per module/file pair, making the overview O(n^2) on large
+-- repositories (minutes for tens of thousands of entities).
+CREATE INDEX IF NOT EXISTS entities_run_file_idx
+    ON entities (run_id, file_id);
+-- The same overview resolves each module's 'contains' edges by run_id and
+-- source, so a run-led index avoids leaning on the project-led source index
+-- whose leading column that join does not constrain.
+CREATE INDEX IF NOT EXISTS relationships_run_source_idx
+    ON relationships (run_id, source_entity_id, relationship_type);

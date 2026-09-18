@@ -29,11 +29,15 @@ func (b *graphBuilder) addStructuralEntities() {
 
 		moduleID := b.ensureModule(record.Path)
 		moduleHasFiles[moduleID] = true
-		if !record.IsTest {
+		b.moduleFileCount[moduleID]++
+		if record.IsTest {
+			b.moduleTestFiles[moduleID]++
+		} else {
 			moduleHasProductionFiles[moduleID] = true
 		}
 		fileEntity := b.newFileEntity(record)
 		b.fileEntityIDs[record.Path] = fileEntity.ID
+		b.entityModule[fileEntity.ID] = moduleID
 		b.graph.Entities = append(b.graph.Entities, fileEntity)
 		indexEntity(fileEntity, b.byName, b.byQualified)
 		b.graph.Relationships = append(
@@ -110,9 +114,15 @@ func (b *graphBuilder) addDeclarations() {
 			continue
 		}
 
+		moduleID := b.moduleIDForPath(result.Path)
 		for _, seed := range result.Entities {
 			entityID := id.Stable(b.runID, result.Path, seed.Key)
 			b.seedIDs[seedLookupKey(result.Path, seed.Key)] = entityID
+			b.entityModule[entityID] = moduleID
+			b.moduleSymbolCount[moduleID]++
+			if seed.Kind == "route" {
+				b.moduleRouteCount[moduleID]++
+			}
 			entity := model.Entity{
 				ID:            entityID,
 				ProjectID:     b.projectID,
@@ -144,6 +154,36 @@ func (b *graphBuilder) addDeclarations() {
 				),
 			)
 		}
+	}
+}
+
+// moduleIDForPath returns the module id for a file's directory, matching the
+// bucketing ensureModule uses ("(root)" for top-level files).
+func (b *graphBuilder) moduleIDForPath(filePath string) string {
+	directory := path.Dir(filePath)
+	if directory == "." {
+		directory = "(root)"
+	}
+	return b.moduleIDs[directory]
+}
+
+// finalizeModuleStats writes the accumulated per-module rollup counts into each
+// module entity's metadata, so the architecture overview can read them directly
+// instead of aggregating symbols at query time.
+func (b *graphBuilder) finalizeModuleStats() {
+	for index := range b.graph.Entities {
+		entity := &b.graph.Entities[index]
+		if entity.Kind != "module" {
+			continue
+		}
+		if entity.Metadata == nil {
+			entity.Metadata = map[string]any{}
+		}
+		entity.Metadata["fileCount"] = b.moduleFileCount[entity.ID]
+		entity.Metadata["testFileCount"] = b.moduleTestFiles[entity.ID]
+		entity.Metadata["symbolCount"] = b.moduleSymbolCount[entity.ID]
+		entity.Metadata["routeCount"] = b.moduleRouteCount[entity.ID]
+		entity.Metadata["expandable"] = true
 	}
 }
 
