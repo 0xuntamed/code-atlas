@@ -1,0 +1,17 @@
+# Keep the build context small and reproducible.
+.git
+web/node_modules
+web/dist
+**/*.tsbuildinfo
+codeatlas
+codeatlas.exe
+coverage.out
+.codeatlas-data
+*.db
+*.db-wal
+*.db-shm
+.claude
+.idea
+.vscode
+.DS_Store
+Thumbs.db
