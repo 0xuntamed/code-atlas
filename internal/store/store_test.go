@@ -47,8 +47,14 @@ func seedGraph(t *testing.T, s *Store) {
 		}
 		return model.Entity{ID: id, ProjectID: "p1", RunID: "run1", FileID: fileID, Kind: kind, Name: name, QualifiedName: name, Language: "go"}
 	}
+	moduleNode := entity("m", "module", "app")
+	// Per-module rollup counts are precomputed by the analyzer and stored in
+	// metadata; the overview reads them directly, so seed them here.
+	moduleNode.Metadata = map[string]any{
+		"fileCount": 1, "testFileCount": 0, "symbolCount": 3, "routeCount": 1,
+	}
 	entities := []model.Entity{
-		entity("m", "module", "app"),
+		moduleNode,
 		entity("fe", "file", "main.go"),
 		entity("fn1", "function", "handler"),
 		entity("fn2", "function", "helper"),
@@ -88,13 +94,14 @@ func TestArchitectureGraphAggregatesModules(t *testing.T) {
 	if m.Kind != "module" {
 		t.Fatalf("expected module node, got %q", m.Kind)
 	}
-	if got := m.Metadata["fileCount"]; got != 1 {
+	// Counts round-trip through JSON metadata, so they come back as float64.
+	if got := metaInt(m.Metadata, "fileCount"); got != 1 {
 		t.Errorf("fileCount = %v, want 1", got)
 	}
-	if got := m.Metadata["symbolCount"]; got != 3 {
+	if got := metaInt(m.Metadata, "symbolCount"); got != 3 {
 		t.Errorf("symbolCount = %v, want 3", got)
 	}
-	if got := m.Metadata["routeCount"]; got != 1 {
+	if got := metaInt(m.Metadata, "routeCount"); got != 1 {
 		t.Errorf("routeCount = %v, want 1", got)
 	}
 }

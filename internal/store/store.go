@@ -35,7 +35,7 @@ type Store struct {
 // Open opens (creating if necessary) the SQLite database at path. The bundled
 // driver is pure Go, so no external database process or C toolchain is needed.
 func Open(ctx context.Context, path string) (*Store, error) {
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)", path)
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(normal)&_pragma=foreign_keys(on)&_pragma=temp_store(memory)&_pragma=cache_size(-65536)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -271,6 +271,13 @@ func (s *Store) ReplaceRunData(ctx context.Context, runID string, files []model.
 		return err
 	}
 	defer tx.Rollback()
+	// Defer foreign-key enforcement to commit time. Otherwise every one of the
+	// (often hundreds of thousands of) relationship rows does live existence
+	// checks against entities/files as it inserts; deferring lets the whole set
+	// be validated once at COMMIT, which dominates persist time on large repos.
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
+		return err
+	}
 	// Delete children before parents so foreign keys stay satisfied.
 	for _, table := range []string{"relationships", "entities", "files"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE run_id=?`, runID); err != nil {
@@ -342,10 +349,44 @@ func (s *Store) PromoteRun(ctx context.Context, runID, projectID string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	cutoff := microsFromNow(-time.Minute)
-	_, _ = s.db.ExecContext(ctx, `
-		DELETE FROM analysis_runs WHERE project_id=? AND id<>? AND status='ready' AND created_at < ?`, projectID, runID, cutoff)
+	// Prune superseded runs. Once this run is promoted active, every other
+	// completed run for the project is stale; without this, each re-analysis
+	// leaves a full copy of the graph behind, bloating the file and slowing
+	// every project-scoped query. Delete each stale run's rows explicitly and
+	// index-friendly (by project_id+run_id) rather than via one cascading
+	// DELETE of the run row — that cascade can span hundreds of thousands of
+	// rows in a single statement, time out under WAL lock contention, and
+	// silently roll back, leaving the stale copy in place. In-flight runs
+	// (queued/analyzing) are left untouched. Runs in the background with its own
+	// context so a large cleanup never blocks analysis completion; best-effort,
+	// a failure only costs space, never correctness.
+	go s.pruneSupersededRuns(context.Background(), projectID, runID)
 	return nil
+}
+
+func (s *Store) pruneSupersededRuns(ctx context.Context, projectID, activeRunID string) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM analysis_runs WHERE project_id=? AND id<>? AND status IN ('ready','failed')`,
+		projectID, activeRunID)
+	if err != nil {
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	for _, id := range stale {
+		for _, table := range []string{"relationships", "entities", "files"} {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE project_id=? AND run_id=?`, projectID, id); err != nil {
+				return
+			}
+		}
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM analysis_runs WHERE id=?`, id)
+	}
 }
 
 func (s *Store) DeleteProject(ctx context.Context, id string) error {

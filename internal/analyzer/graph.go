@@ -31,6 +31,19 @@ type graphBuilder struct {
 	parsedByPath  map[string]parserpkg.ParseResult
 	syntheticIDs  map[string]string
 	importsByFile map[string][]string
+
+	// Per-module rollup counts, accumulated during the build and written into
+	// each module's metadata by finalizeModuleStats. Precomputing these makes
+	// the architecture overview a cheap read instead of a query-time
+	// aggregation over every symbol in the repository.
+	moduleFileCount   map[string]int
+	moduleTestFiles   map[string]int
+	moduleSymbolCount map[string]int
+	moduleRouteCount  map[string]int
+	// entityModule maps a file/symbol entity id to the module it belongs to, so
+	// module-to-module edges can be aggregated in memory (see addModuleEdges)
+	// instead of joining symbols to modules at query time.
+	entityModule map[string]string
 }
 
 func buildGraph(
@@ -45,6 +58,8 @@ func buildGraph(
 	builder.addDeclarations()
 	builder.addImports()
 	builder.addReferences()
+	builder.addModuleEdges()
+	builder.finalizeModuleStats()
 	return builder.finish()
 }
 
@@ -70,9 +85,14 @@ func newGraphBuilder(
 		moduleIDs:     make(map[string]string),
 		byName:        make(map[string][]model.Entity),
 		byQualified:   make(map[string]model.Entity),
-		parsedByPath:  make(map[string]parserpkg.ParseResult),
-		syntheticIDs:  make(map[string]string),
-		importsByFile: make(map[string][]string),
+		parsedByPath:      make(map[string]parserpkg.ParseResult),
+		syntheticIDs:      make(map[string]string),
+		importsByFile:     make(map[string][]string),
+		moduleFileCount:   make(map[string]int),
+		moduleTestFiles:   make(map[string]int),
+		moduleSymbolCount: make(map[string]int),
+		moduleRouteCount:  make(map[string]int),
+		entityModule:      make(map[string]string),
 	}
 }
 

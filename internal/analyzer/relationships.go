@@ -123,6 +123,63 @@ func (b *graphBuilder) unresolvedEntity(filePath, name string) string {
 	return entityID
 }
 
+// moduleEdgeKinds are the symbol/file relationship kinds that roll up into
+// module-to-module edges for the architecture overview.
+var moduleEdgeKinds = map[string]bool{"imports": true, "calls": true, "depends_on": true}
+
+// addModuleEdges precomputes aggregate module-to-module edges from the
+// symbol/file relationships. Storing these (with a "module_" kind prefix so they
+// never mix into symbol-level traversals) lets the architecture overview read a
+// few hundred edges directly instead of joining every symbol to its module at
+// query time — which was the overview's dominant cost on large repositories.
+func (b *graphBuilder) addModuleEdges() {
+	type edgeKey struct{ source, target, kind string }
+	type edgeAgg struct {
+		count       int
+		confidence  float64
+		allResolved bool
+	}
+	aggregates := make(map[edgeKey]*edgeAgg)
+	for _, relationship := range b.graph.Relationships {
+		if !moduleEdgeKinds[relationship.Kind] {
+			continue
+		}
+		sourceModule := b.entityModule[relationship.SourceID]
+		targetModule := b.entityModule[relationship.TargetID]
+		if sourceModule == "" || targetModule == "" || sourceModule == targetModule {
+			continue
+		}
+		key := edgeKey{sourceModule, targetModule, relationship.Kind}
+		agg := aggregates[key]
+		if agg == nil {
+			agg = &edgeAgg{allResolved: true}
+			aggregates[key] = agg
+		}
+		agg.count++
+		agg.confidence += relationship.Confidence
+		if relationship.Resolution != "resolved" {
+			agg.allResolved = false
+		}
+	}
+	for key, agg := range aggregates {
+		resolution := "inferred"
+		if agg.allResolved {
+			resolution = "resolved"
+		}
+		b.graph.Relationships = append(b.graph.Relationships, model.Relationship{
+			ID:         id.Stable(b.runID, "module_edge", key.source, key.target, key.kind),
+			ProjectID:  b.projectID,
+			RunID:      b.runID,
+			SourceID:   key.source,
+			TargetID:   key.target,
+			Kind:       "module_" + key.kind,
+			Confidence: agg.confidence / float64(agg.count),
+			Resolution: resolution,
+			Metadata:   map[string]any{"aggregate": true, "relationshipCount": agg.count},
+		})
+	}
+}
+
 func dedupeRelationships(input []model.Relationship) []model.Relationship {
 	seen := make(map[string]struct{}, len(input))
 	result := make([]model.Relationship, 0, len(input))

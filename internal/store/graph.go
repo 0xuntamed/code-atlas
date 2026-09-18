@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/codeatlas/codeatlas/internal/model"
@@ -36,84 +37,63 @@ func (s *Store) ArchitectureGraph(ctx context.Context, projectID, scopeID string
 		return s.NeighborhoodGraph(ctx, projectID, scopeID, limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+entityColumns+`,
-			count(DISTINCT file_entity.id) AS file_count,
-			count(DISTINCT file_entity.id) FILTER (WHERE file_entity.is_test) AS test_file_count,
-			count(DISTINCT symbol.id) FILTER (
-				WHERE symbol.kind NOT IN ('module', 'file')
-			) AS symbol_count,
-			count(DISTINCT symbol.id) FILTER (WHERE symbol.kind = 'route') AS route_count
-		FROM entities e
-		JOIN projects p ON p.active_run_id=e.run_id
-		LEFT JOIN relationships contains_edge
-			ON contains_edge.run_id=e.run_id
-			AND contains_edge.source_entity_id=e.id
-			AND contains_edge.relationship_type='contains'
-		LEFT JOIN entities file_entity
-			ON file_entity.id=contains_edge.target_entity_id
-			AND file_entity.kind='file'
-		LEFT JOIN entities symbol
-			ON symbol.run_id=e.run_id
-			AND symbol.file_id=file_entity.file_id
-		WHERE e.project_id=? AND e.kind='module'
-		GROUP BY e.id,p.active_run_id
-		ORDER BY route_count DESC,symbol_count DESC,e.qualified_name
-		LIMIT ?`, projectID, limit+1)
+	// The per-module rollup counts (files, symbols, routes) are precomputed at
+	// analysis time and stored in each module's metadata (see
+	// analyzer.finalizeModuleStats). So the overview is a cheap indexed read of
+	// the module rows plus an in-memory sort — not a query-time aggregation over
+	// every symbol in the repository, which was O(n^2) and took minutes on large
+	// repos. There are at most a few thousand modules, so sorting in Go is fine.
+	rows, err := s.db.QueryContext(ctx, `SELECT `+entityColumns+`
+		FROM entities e JOIN projects p ON p.active_run_id=e.run_id
+		WHERE e.project_id=? AND e.kind='module'`, projectID)
 	if err != nil {
 		return model.Graph{}, err
 	}
 	defer rows.Close()
-	nodes := make([]model.Entity, 0, limit)
-	truncated := false
+	modules := make([]model.Entity, 0, 256)
 	for rows.Next() {
-		var entity model.Entity
-		var metadata []byte
-		var isTest int
-		var fileCount, testFileCount, symbolCount, routeCount int
-		if err := rows.Scan(
-			&entity.ID,
-			&entity.ProjectID,
-			&entity.RunID,
-			&entity.FileID,
-			&entity.Kind,
-			&entity.Name,
-			&entity.QualifiedName,
-			&entity.Language,
-			&entity.Range.StartLine,
-			&entity.Range.StartColumn,
-			&entity.Range.EndLine,
-			&entity.Range.EndColumn,
-			&isTest,
-			&metadata,
-			&fileCount,
-			&testFileCount,
-			&symbolCount,
-			&routeCount,
-		); err != nil {
+		entity, err := scanEntity(rows)
+		if err != nil {
 			return model.Graph{}, err
 		}
-		_ = json.Unmarshal(metadata, &entity.Metadata)
 		if entity.Metadata == nil {
 			entity.Metadata = make(map[string]any)
 		}
-		entity.Metadata["fileCount"] = fileCount
-		entity.Metadata["testFileCount"] = testFileCount
-		entity.Metadata["symbolCount"] = symbolCount
-		entity.Metadata["routeCount"] = routeCount
 		entity.Metadata["expandable"] = true
-		entity.IsTest = fileCount > 0 && testFileCount == fileCount
-		if len(nodes) < limit {
-			nodes = append(nodes, entity)
-		} else {
-			truncated = true
-		}
+		modules = append(modules, *entity)
 	}
 	if err := rows.Err(); err != nil {
 		return model.Graph{}, err
 	}
-	edges, err := s.moduleEdges(ctx, projectID, nodes)
-	return model.Graph{Nodes: nodes, Edges: edges, Truncated: truncated, Limit: limit}, err
+	sort.SliceStable(modules, func(left, right int) bool {
+		if rl, rr := metaInt(modules[left].Metadata, "routeCount"), metaInt(modules[right].Metadata, "routeCount"); rl != rr {
+			return rl > rr
+		}
+		if sl, sr := metaInt(modules[left].Metadata, "symbolCount"), metaInt(modules[right].Metadata, "symbolCount"); sl != sr {
+			return sl > sr
+		}
+		return modules[left].QualifiedName < modules[right].QualifiedName
+	})
+	truncated := len(modules) > limit
+	if truncated {
+		modules = modules[:limit]
+	}
+	edges, err := s.moduleEdges(ctx, projectID, modules)
+	return model.Graph{Nodes: modules, Edges: edges, Truncated: truncated, Limit: limit}, err
+}
+
+// metaInt reads an integer from decoded JSON metadata, where numbers arrive as
+// float64.
+func metaInt(metadata map[string]any, key string) int {
+	switch value := metadata[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int64:
+		return int(value)
+	}
+	return 0
 }
 
 // NeighborhoodGraph returns one root and its direct structural or behavioral
@@ -142,43 +122,41 @@ func (s *Store) moduleEdges(ctx context.Context, projectID string, nodes []model
 		return []model.Relationship{}, nil
 	}
 
+	// Scope every scan to the project's active run explicitly. Filtering on
+	// (project_id, run_id) lets the relationships indexes seek just that run's
+	// rows instead of scanning every run's copy of the graph — the difference
+	// between reading ~200k rows and every superseded run's rows combined.
+	var activeRun string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(active_run_id,'') FROM projects WHERE id=?`, projectID).Scan(&activeRun); err != nil {
+		return nil, err
+	}
+	if activeRun == "" {
+		return []model.Relationship{}, nil
+	}
+
 	moduleIDs := make([]string, len(nodes))
 	for index := range nodes {
 		moduleIDs[index] = nodes[index].ID
 	}
-	kinds := []string{"imports", "calls", "depends_on"}
-
+	// The aggregate module-to-module edges are precomputed at analysis time and
+	// stored with a "module_" kind prefix (see analyzer.addModuleEdges), so this
+	// reads a few hundred edges by an indexed (project_id, run_id, source) seek
+	// rather than aggregating every symbol relationship at query time.
+	kinds := []string{"module_imports", "module_calls", "module_depends_on"}
 	query := fmt.Sprintf(`
-		WITH module_files AS (
-			SELECT contains_edge.source_entity_id AS module_id,file_entity.file_id
-			FROM relationships contains_edge
-			JOIN projects p ON p.active_run_id=contains_edge.run_id
-			JOIN entities file_entity ON file_entity.id=contains_edge.target_entity_id
-			WHERE contains_edge.project_id=?
-				AND contains_edge.source_entity_id IN (%s)
-				AND contains_edge.relationship_type='contains'
-		)
-		SELECT source_module.module_id,target_module.module_id,
-			rel.relationship_type,count(*) AS relationship_count,
-			avg(rel.confidence) AS confidence,
-			min(CASE WHEN rel.resolution_state='resolved' THEN 1 ELSE 0 END) AS fully_resolved
-		FROM relationships rel
-		JOIN projects p ON p.active_run_id=rel.run_id
-		JOIN entities source_entity ON source_entity.id=rel.source_entity_id
-		JOIN entities target_entity ON target_entity.id=rel.target_entity_id
-		JOIN module_files source_module ON source_module.file_id=source_entity.file_id
-		JOIN module_files target_module ON target_module.file_id=target_entity.file_id
-		WHERE rel.project_id=?
-			AND rel.relationship_type IN (%s)
-			AND source_module.module_id<>target_module.module_id
-		GROUP BY source_module.module_id,target_module.module_id,rel.relationship_type
-		ORDER BY relationship_count DESC,source_module.module_id,target_module.module_id`,
-		placeholders(len(moduleIDs)), placeholders(len(kinds)))
+		SELECT source_entity_id,target_entity_id,relationship_type,confidence,resolution_state,metadata
+		FROM relationships
+		WHERE project_id=? AND run_id=?
+			AND relationship_type IN (%s)
+			AND source_entity_id IN (%s)
+			AND target_entity_id IN (%s)
+		ORDER BY relationship_type,source_entity_id,target_entity_id`,
+		placeholders(len(kinds)), placeholders(len(moduleIDs)), placeholders(len(moduleIDs)))
 
-	args := []any{projectID}
-	args = append(args, stringArgs(moduleIDs)...)
-	args = append(args, projectID)
+	args := []any{projectID, activeRun}
 	args = append(args, stringArgs(kinds)...)
+	args = append(args, stringArgs(moduleIDs)...)
+	args = append(args, stringArgs(moduleIDs)...)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -189,25 +167,18 @@ func (s *Store) moduleEdges(ctx context.Context, projectID string, nodes []model
 	edges := make([]model.Relationship, 0)
 	for rows.Next() {
 		var edge model.Relationship
-		var count int
-		var fullyResolved int
-		if err := rows.Scan(
-			&edge.SourceID,
-			&edge.TargetID,
-			&edge.Kind,
-			&count,
-			&edge.Confidence,
-			&fullyResolved,
-		); err != nil {
+		var kind string
+		var metadata []byte
+		if err := rows.Scan(&edge.SourceID, &edge.TargetID, &kind, &edge.Confidence, &edge.Resolution, &metadata); err != nil {
 			return nil, err
 		}
+		edge.Kind = strings.TrimPrefix(kind, "module_")
 		edge.ID = fmt.Sprintf("aggregate:%s:%s:%s", edge.SourceID, edge.TargetID, edge.Kind)
 		edge.ProjectID = projectID
-		edge.Resolution = "inferred"
-		if fullyResolved == 1 {
-			edge.Resolution = "resolved"
+		_ = json.Unmarshal(metadata, &edge.Metadata)
+		if edge.Metadata == nil {
+			edge.Metadata = map[string]any{}
 		}
-		edge.Metadata = map[string]any{"aggregate": true, "relationshipCount": count}
 		edges = append(edges, edge)
 	}
 	return edges, rows.Err()
