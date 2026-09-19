@@ -27,10 +27,12 @@ COPY --from=build /out/codeatlas /usr/local/bin/codeatlas
 
 # PORT defaults to 7331 for a plain `docker run`; platforms like Railway inject
 # their own PORT and the server binds 0.0.0.0:$PORT (see defaultListen). The
-# database lives on the /data volume so it survives restarts and redeploys.
+# database lives under CODEATLAS_DATA_DIR (/data); mount a persistent volume
+# there so it survives restarts and redeploys. There is deliberately no VOLUME
+# instruction: Railway rejects it and manages its own volumes, while a plain
+# `docker run` uses `-v <name>:/data`.
 ENV PORT=7331 \
 	CODEATLAS_DATA_DIR=/data
 EXPOSE 7331
-VOLUME ["/data"]
 
 ENTRYPOINT ["codeatlas", "serve"]
