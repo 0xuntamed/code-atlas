@@ -62,7 +62,7 @@ func run(args []string) error {
 
 func serve(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	listen := flags.String("listen", env("CODEATLAS_LISTEN_ADDR", defaultListenAddress), "loopback listen address")
+	listen := flags.String("listen", defaultListen(), "listen address host:port")
 	databasePath := flags.String("database", env("CODEATLAS_DATABASE_PATH", ""), "SQLite database file path (defaults to <data-dir>/"+databaseFileName+")")
 	dataDir := flags.String("data-dir", env("CODEATLAS_DATA_DIR", defaultDataDir()), "local application data directory")
 	if err := flags.Parse(args); err != nil {
@@ -214,6 +214,21 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// defaultListen resolves the address the server binds to. An explicit
+// CODEATLAS_LISTEN_ADDR wins; otherwise a platform-provided PORT (Railway, Fly,
+// Render, …) binds all interfaces on that port; otherwise it stays on the
+// local-first loopback default so a plain `codeatlas serve` never exposes itself
+// on the network.
+func defaultListen() string {
+	if addr := os.Getenv("CODEATLAS_LISTEN_ADDR"); addr != "" {
+		return addr
+	}
+	if port := os.Getenv("PORT"); port != "" {
+		return "0.0.0.0:" + port
+	}
+	return defaultListenAddress
 }
 
 func defaultDataDir() string {

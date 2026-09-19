@@ -25,9 +25,10 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /out/codeatlas /usr/local/bin/codeatlas
 
-# Listen on all interfaces so the mapped port is reachable, and keep the
-# database on a volume so it survives container restarts.
-ENV CODEATLAS_LISTEN_ADDR=0.0.0.0:7331 \
+# PORT defaults to 7331 for a plain `docker run`; platforms like Railway inject
+# their own PORT and the server binds 0.0.0.0:$PORT (see defaultListen). The
+# database lives on the /data volume so it survives restarts and redeploys.
+ENV PORT=7331 \
 	CODEATLAS_DATA_DIR=/data
 EXPOSE 7331
 VOLUME ["/data"]
