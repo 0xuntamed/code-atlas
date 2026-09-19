@@ -3,6 +3,8 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/codeatlas/codeatlas/internal/store"
 	"github.com/codeatlas/codeatlas/internal/webui"
@@ -13,6 +15,12 @@ type Server struct {
 	dataDir  string
 	logger   *slog.Logger
 	shutdown func()
+	// Hostnames accepted in addition to loopback. Populated from
+	// CODEATLAS_ALLOWED_HOSTS (comma-separated) so a deployed instance can serve
+	// its public domain; "*" allows any host. Empty keeps the local-first
+	// loopback-only default.
+	allowedHosts  map[string]bool
+	allowAllHosts bool
 }
 
 func New(
@@ -21,11 +29,26 @@ func New(
 	logger *slog.Logger,
 	shutdown func(),
 ) *Server {
+	allowedHosts := make(map[string]bool)
+	allowAll := false
+	for _, host := range strings.Split(os.Getenv("CODEATLAS_ALLOWED_HOSTS"), ",") {
+		host = strings.ToLower(strings.TrimSpace(host))
+		switch host {
+		case "":
+			continue
+		case "*":
+			allowAll = true
+		default:
+			allowedHosts[host] = true
+		}
+	}
 	return &Server{
-		store:    database,
-		dataDir:  dataDir,
-		logger:   logger,
-		shutdown: shutdown,
+		store:         database,
+		dataDir:       dataDir,
+		logger:        logger,
+		shutdown:      shutdown,
+		allowedHosts:  allowedHosts,
+		allowAllHosts: allowAll,
 	}
 }
 

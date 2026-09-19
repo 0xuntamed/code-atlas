@@ -57,6 +57,35 @@ func TestLoopbackValidation(t *testing.T) {
 	}
 }
 
+func TestHostAllowlist(t *testing.T) {
+	// Loopback-only by default: no allowlist configured.
+	strict := &Server{allowedHosts: map[string]bool{}}
+	if !strict.hostAllowed("127.0.0.1:7331") {
+		t.Error("loopback host must always be allowed")
+	}
+	if strict.hostAllowed("demo.example.com") {
+		t.Error("non-loopback host must be rejected without an allowlist")
+	}
+
+	// An explicit allowlist admits the named host and its origin, still rejecting others.
+	allowed := &Server{allowedHosts: map[string]bool{"demo.example.com": true}}
+	if !allowed.hostAllowed("demo.example.com:7331") {
+		t.Error("allowlisted host must be accepted")
+	}
+	if !allowed.originAllowed("https://demo.example.com") {
+		t.Error("allowlisted origin must be accepted")
+	}
+	if allowed.hostAllowed("evil.example.com") {
+		t.Error("host outside the allowlist must be rejected")
+	}
+
+	// "*" admits any host.
+	wildcard := &Server{allowedHosts: map[string]bool{}, allowAllHosts: true}
+	if !wildcard.hostAllowed("anything.example.com") {
+		t.Error("wildcard allowlist must accept any host")
+	}
+}
+
 func TestProjectPathHelpers(t *testing.T) {
 	if name := gitProjectName("https://github.com/example/code-atlas.git"); name != "code-atlas" {
 		t.Fatalf("gitProjectName returned %q", name)
