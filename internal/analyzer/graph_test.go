@@ -108,6 +108,21 @@ func TestBuildGraphPrecomputesModuleEdges(t *testing.T) {
 	}
 }
 
+func TestDedupeEntitiesKeepsFirstPerID(t *testing.T) {
+	input := []model.Entity{
+		{ID: "a", Name: "first"},
+		{ID: "b", Name: "other"},
+		{ID: "a", Name: "duplicate"},
+	}
+	out := dedupeEntities(input)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 unique entities, got %d", len(out))
+	}
+	if out[0].ID != "a" || out[0].Name != "first" {
+		t.Errorf("expected the first 'a' to survive, got %+v", out[0])
+	}
+}
+
 func TestBuildGraphMarksTestOnlyModules(t *testing.T) {
 	runID := "run"
 	projectID := "project"

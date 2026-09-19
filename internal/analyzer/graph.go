@@ -97,9 +97,29 @@ func newGraphBuilder(
 }
 
 func (b *graphBuilder) finish() builtGraph {
+	b.graph.Entities = dedupeEntities(b.graph.Entities)
 	sort.Slice(b.graph.Entities, func(left, right int) bool {
 		return b.graph.Entities[left].QualifiedName < b.graph.Entities[right].QualifiedName
 	})
 	b.graph.Relationships = dedupeRelationships(b.graph.Relationships)
 	return b.graph
+}
+
+// dedupeEntities keeps the first entity for each id. Entity ids are stable
+// hashes of (run, file, symbol key); a parser can occasionally emit two
+// symbols in one file that hash to the same key (e.g. same-named declarations),
+// which would otherwise violate the entities primary key and fail the whole
+// run. Relationships reference ids, so dropping an exact-id duplicate leaves no
+// dangling edges — they simply point at the surviving entity.
+func dedupeEntities(input []model.Entity) []model.Entity {
+	seen := make(map[string]struct{}, len(input))
+	result := make([]model.Entity, 0, len(input))
+	for _, entity := range input {
+		if _, exists := seen[entity.ID]; exists {
+			continue
+		}
+		seen[entity.ID] = struct{}{}
+		result = append(result, entity)
+	}
+	return result
 }
