@@ -1,7 +1,7 @@
 import type { MouseEvent } from 'react'
 import './landing.css'
 
-const GITHUB_URL = 'https://github.com/0xuntamed/code-atlas'
+const GITHUB_URL = 'https://github.com/'
 
 // The landing page is the app's front door. "Explore the live demo" navigates
 // internally to /app (which lands on add-repo when empty, or the workspace when
