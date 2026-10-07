@@ -1,0 +1,28 @@
+# Render blueprint for CodeAtlas (https://render.com/docs/blueprint-spec).
+# Deploys the Dockerfile (CGO Tree-sitter build) as a single web service with a
+# persistent disk for the embedded SQLite database.
+services:
+  - type: web
+    name: code-atlas
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # A persistent disk requires a paid instance type (Starter+). On the free
+    # plan there are no disks, so the DB lives on ephemeral storage and resets
+    # on every deploy/restart, and the service cold-starts after inactivity.
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      # Render injects PORT; the server binds 0.0.0.0:$PORT (see defaultListen).
+      # Allow the public Render host past the loopback-only guard. Set this to
+      # the exact *.onrender.com domain after the first deploy to tighten it;
+      # "*" accepts any host.
+      - key: CODEATLAS_ALLOWED_HOSTS
+        value: "*"
+      - key: CODEATLAS_DATA_DIR
+        value: /data
+    disk:
+      name: codeatlas-data
+      mountPath: /data
+      sizeGB: 1
